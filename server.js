@@ -53,13 +53,18 @@ app.post("/orders", async (req, res) => {
 app.get("/orders", async (req, res) => {
   try {
     const query = {};
-    const result = await allOrders.find(query).toArray();
+    // This sort object tells MongoDB to sort by the _id field in descending order.
+    // Since _ids are generated chronologically, -1 gets the newest ones first.
+    const sort = { _id: -1 };
+
+    // I've added .sort(sort) to your query here
+    const result = await allOrders.find(query).sort(sort).toArray();
+
     res.send(result);
   } catch (error) {
     console.log(error);
   }
 });
-
 app.listen(port, () => {  
     console.log(`server is running ${port}`)
 })
