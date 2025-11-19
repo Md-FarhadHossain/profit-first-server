@@ -43,12 +43,36 @@ app.get('/', (req, res) => {
 app.post("/orders", async (req, res) => {
   try {
     const order = req.body;
+
+    // 1. COUNT THE DOCUMENTS DIRECTLY IN MONGODB
+    const count = await allOrders.countDocuments();
+
+    // 2. GENERATE THE ID (Count + 501)
+    // If you have 0 orders, ID will be 501. If 5 orders, ID will be 506.
+    const generatedOrderId = 501 + count;
+
+    // 3. ADD DATA TO THE ORDER OBJECT
+    order.orderId = generatedOrderId;
+    order.createdAt = new Date(); // Ensure server timestamp is used
+
+    // 4. INSERT INTO DATABASE
     const result = await allOrders.insertOne(order);
-    res.send(result);
+
+    // 5. SEND BACK THE NEW ID TO THE FRONTEND
+    // We send the new orderId back so React can use it for the Thank You page
+    res.send({ 
+        success: true, 
+        message: "Order placed", 
+        orderId: generatedOrderId, 
+        mongoResult: result 
+    });
+
   } catch (error) {
     console.log(error.name, error.message);
+    res.status(500).send({ success: false, message: "Server Error" });
   }
 });
+
 
 app.get("/orders", async (req, res) => {
   try {
@@ -65,6 +89,7 @@ app.get("/orders", async (req, res) => {
     console.log(error);
   }
 });
+
 app.listen(port, () => {  
     console.log(`server is running ${port}`)
 })
