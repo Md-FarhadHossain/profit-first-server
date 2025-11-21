@@ -36,17 +36,44 @@ app.get('/', (req, res) => {
     res.send("Hi");
 });
 
+// --- UPDATED POST ROUTE WITH DUPLICATE CHECK ---
 app.post("/orders", async (req, res) => {
   try {
     const order = req.body;
+
+    // 1. CHECK FOR EXISTING ACTIVE ORDER
+    // We look for an order with the same number where the status is NOT finished.
+    // Finished statuses = "Delivered", "Cancelled", "Returned"
+    const existingOrder = await allOrders.findOne({
+      number: order.number,
+      status: { 
+        $nin: ["Delivered", "Cancelled", "Returned", "Return", "Cancel"] 
+      } 
+    });
+
+    // 2. IF ACTIVE ORDER EXISTS, STOP AND RETURN ERROR
+    if (existingOrder) {
+      return res.status(409).send({ 
+        success: false, 
+        reason: "active_order_exists", 
+        message: "Active order already exists for this number." 
+      });
+    }
+
+    // 3. IF NO DUPLICATE, PROCEED TO CREATE ORDER
     const count = await allOrders.countDocuments();
     const generatedOrderId = 501 + count;
+
     order.orderId = generatedOrderId;
     order.createdAt = new Date(); 
+    
     // Set default call status if not provided
     order.phoneCallStatus = "Pending"; 
+
     const result = await allOrders.insertOne(order);
+    
     res.send({ success: true, message: "Order placed", orderId: generatedOrderId, mongoResult: result });
+
   } catch (error) {
     console.log(error.name, error.message);
     res.status(500).send({ success: false, message: "Server Error" });
