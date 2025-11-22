@@ -30,6 +30,8 @@ const dbConnect = async () => {
 dbConnect();
 
 const allOrders = client.db("profit-first").collection("allOrders");
+const partialOrders = client.db("profit-first").collection("partialOrders");
+
 
 app.get('/', (req, res) => {
     res.send("Hi");
@@ -60,6 +62,7 @@ app.post("/orders", async (req, res) => {
     // 2. ANALYTICS: CHECK FOR RECURRING CUSTOMER HISTORY
     // We count ALL previous orders for this phone number to see if they are loyal.
     const previousOrderCount = await allOrders.countDocuments({ number: order.number });
+    
 
     // 3. ENRICH DATA: Add Customer Stats to the Order Object
     order.customerStats = {
@@ -139,6 +142,43 @@ app.patch("/orders/:id/call-status", async (req, res) => {
     res.status(500).send({ message: "Error updating call status" });
   }
 });
+
+
+// --- NEW ROUTE: SAVE PARTIAL DATA (ABANDONED CART) ---
+app.post("/save-partial-order", async (req, res) => {
+  try {
+    const { deviceId, ...data } = req.body;
+
+    if (!deviceId) {
+      return res.status(400).send({ success: false, message: "Device ID required" });
+    }
+
+    // We identify the user by their 'deviceId'. 
+    // If they come back 1 hour later on the same phone, we update the same record.
+    const filter = { deviceId: deviceId };
+    
+    const updateDoc = {
+      $set: {
+        ...data,
+        lastUpdated: new Date(), // So you know when they last typed
+        status: "Abandoned"      // distinct from "Processing"
+      },
+      $setOnInsert: {
+        createdAt: new Date()    // Only set this when creating new
+      }
+    };
+
+    // upsert: true -> Create if not exists, Update if exists
+    const result = await partialOrders.updateOne(filter, updateDoc, { upsert: true });
+
+    res.send({ success: true, result });
+
+  } catch (error) {
+    console.error("Partial Save Error:", error);
+    res.status(500).send({ success: false });
+  }
+});
+
 
 app.listen(port, () => {  
     console.log(`server is running ${port}`);
