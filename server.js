@@ -180,6 +180,24 @@ app.post("/save-partial-order", async (req, res) => {
 });
 
 
+// --- NEW ROUTE: GET PARTIAL ORDERS (View Abandoned Carts) ---
+app.get("/partial-orders", async (req, res) => {
+  try {
+    // 1. Find all records in the 'partialOrders' collection
+    // 2. Sort by 'lastUpdated' in descending order (-1) so the newest ones show first
+    const result = await partialOrders
+      .find({})
+      .sort({ lastUpdated: -1 }) 
+      .toArray();
+
+    res.send(result);
+  } catch (error) {
+    console.error("Error fetching partial orders:", error);
+    res.status(500).send({ message: "Error fetching data" });
+  }
+});
+
+
 app.listen(port, () => {  
     console.log(`server is running ${port}`);
 });
