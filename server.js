@@ -1,6 +1,5 @@
 const express = require("express");
 const app = express();
-// Import ObjectId here
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 require("dotenv").config();
 const cors = require("cors");
@@ -36,14 +35,13 @@ app.get('/', (req, res) => {
     res.send("Hi");
 });
 
-// --- UPDATED POST ROUTE WITH DUPLICATE CHECK ---
+// --- UPDATED POST ROUTE ---
 app.post("/orders", async (req, res) => {
   try {
     const order = req.body;
 
-    // 1. CHECK FOR EXISTING ACTIVE ORDER
-    // We look for an order with the same number where the status is NOT finished.
-    // Finished statuses = "Delivered", "Cancelled", "Returned"
+    // 1. SECURITY: CHECK FOR DUPLICATE ACTIVE ORDERS
+    // (Prevents same person from ordering twice while one is still processing)
     const existingOrder = await allOrders.findOne({
       number: order.number,
       status: { 
@@ -51,7 +49,6 @@ app.post("/orders", async (req, res) => {
       } 
     });
 
-    // 2. IF ACTIVE ORDER EXISTS, STOP AND RETURN ERROR
     if (existingOrder) {
       return res.status(409).send({ 
         success: false, 
@@ -60,7 +57,18 @@ app.post("/orders", async (req, res) => {
       });
     }
 
-    // 3. IF NO DUPLICATE, PROCEED TO CREATE ORDER
+    // 2. ANALYTICS: CHECK FOR RECURRING CUSTOMER HISTORY
+    // We count ALL previous orders for this phone number to see if they are loyal.
+    const previousOrderCount = await allOrders.countDocuments({ number: order.number });
+
+    // 3. ENRICH DATA: Add Customer Stats to the Order Object
+    order.customerStats = {
+        isReturningCustomer: previousOrderCount > 0, // True if they have ordered before
+        totalOrdersBeforeThis: previousOrderCount,   // Exact number of past orders
+        customerType: previousOrderCount > 0 ? "Returning" : "New"
+    };
+
+    // 4. GENERATE ORDER ID & SAVE
     const count = await allOrders.countDocuments();
     const generatedOrderId = 501 + count;
 
@@ -91,7 +99,7 @@ app.get("/orders", async (req, res) => {
   }
 });
 
-// --- EXISTING ROUTE: Update Order Status (Processing, Shipped, etc) ---
+// --- EXISTING ROUTE: Update Order Status ---
 app.patch("/orders/:id", async (req, res) => {
   const id = req.params.id;
   const { status } = req.body;
@@ -111,15 +119,13 @@ app.patch("/orders/:id", async (req, res) => {
   }
 });
 
-// --- NEW ROUTE: Update Call Status (Pending, Confirmed, No Answer) ---
+// --- NEW ROUTE: Update Call Status ---
 app.patch("/orders/:id/call-status", async (req, res) => {
   const id = req.params.id;
   const { callStatus } = req.body;
 
   try {
     const filter = { _id: new ObjectId(id) };
-    
-    // Note: We map 'callStatus' from frontend to 'phoneCallStatus' in Database
     const updateDoc = {
       $set: {
         phoneCallStatus: callStatus 
