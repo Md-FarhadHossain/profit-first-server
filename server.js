@@ -122,7 +122,7 @@ app.post("/orders", async (req, res) => {
 app.get("/orders", async (req, res) => {
   try {
     const query = {};
-    const sort = { _id: -1 };
+    const sort = { createdAt: -1 };
     const result = await allOrders.find(query).sort(sort).toArray();
     res.send(result);
   } catch (error) {
