@@ -130,18 +130,35 @@ app.get("/orders", async (req, res) => {
   }
 });
 
-// --- EXISTING ROUTE: Update Order Status ---
+// --- UPDATED ROUTE: Update Order Status & Save Timestamps ---
 app.patch("/orders/:id", async (req, res) => {
   const id = req.params.id;
   const { status } = req.body;
+  const now = new Date();
 
   try {
     const filter = { _id: new ObjectId(id) };
-    const updateDoc = {
-      $set: {
-        status: status
-      },
+    
+    // Base update: always update status
+    let updateFields = {
+      status: status
     };
+
+    // Add specific timestamps based on status
+    if (status === "Shipped") {
+        updateFields.shippedAt = now;
+    } else if (status === "Delivered") {
+        updateFields.deliveredAt = now;
+    } else if (status === "Cancelled") {
+        updateFields.cancelledAt = now;
+    } else if (status === "Returned") {
+        updateFields.returnedAt = now;
+    }
+
+    const updateDoc = {
+      $set: updateFields,
+    };
+
     const result = await allOrders.updateOne(filter, updateDoc);
     res.send(result);
   } catch (error) {
