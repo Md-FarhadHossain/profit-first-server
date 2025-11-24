@@ -237,6 +237,42 @@ app.delete("/partial-orders/:id", async (req, res) => {
   }
 });
 
+
+// --- NEW ROUTE: REVERSE MIGRATION (Active -> Abandoned) ---
+app.post("/orders/:id/move-to-abandoned", async (req, res) => {
+  const id = req.params.id;
+  try {
+    // 1. Find the order in Active Orders
+    const order = await allOrders.findOne({ _id: new ObjectId(id) });
+    if (!order) {
+        return res.status(404).send({ success: false, message: "Order not found" });
+    }
+
+    // 2. Prepare data for Partial Orders
+    // We strip the _id to create a new document in partialOrders
+    // We force the status to 'Abandoned'
+    const abandonedOrder = {
+        ...order,
+        _id: undefined, // Let MongoDB generate a fresh ID
+        status: "Abandoned", 
+        movedFromActive: true,
+        restoredAt: new Date()
+    };
+
+    // 3. Insert into Partial Orders
+    await partialOrders.insertOne(abandonedOrder);
+
+    // 4. Delete from Active Orders
+    await allOrders.deleteOne({ _id: new ObjectId(id) });
+
+    res.send({ success: true, message: "Order moved to Abandoned" });
+
+  } catch (error) {
+    console.log("Reverse Migration Error:", error);
+    res.status(500).send({ message: "Error moving order" });
+  }
+});
+
 app.listen(port, () => {  
     console.log(`server is running ${port}`);
 });
