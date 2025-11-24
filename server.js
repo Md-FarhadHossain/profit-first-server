@@ -43,7 +43,6 @@ app.post("/orders", async (req, res) => {
     const order = req.body;
 
     // 1. SECURITY: CHECK FOR DUPLICATE ACTIVE ORDERS
-    // (Prevents same person from ordering twice while one is still processing)
     const existingOrder = await allOrders.findOne({
       number: order.number,
       status: { 
@@ -60,14 +59,12 @@ app.post("/orders", async (req, res) => {
     }
 
     // 2. ANALYTICS: CHECK FOR RECURRING CUSTOMER HISTORY
-    // We count ALL previous orders for this phone number to see if they are loyal.
     const previousOrderCount = await allOrders.countDocuments({ number: order.number });
-    
 
-    // 3. ENRICH DATA: Add Customer Stats to the Order Object
+    // 3. ENRICH DATA
     order.customerStats = {
-        isReturningCustomer: previousOrderCount > 0, // True if they have ordered before
-        totalOrdersBeforeThis: previousOrderCount,   // Exact number of past orders
+        isReturningCustomer: previousOrderCount > 0,
+        totalOrdersBeforeThis: previousOrderCount,
         customerType: previousOrderCount > 0 ? "Returning" : "New"
     };
 
@@ -79,10 +76,40 @@ app.post("/orders", async (req, res) => {
     order.createdAt = new Date(); 
     
     // Set default call status if not provided
-    order.phoneCallStatus = "Pending"; 
+    if (!order.phoneCallStatus) {
+        order.phoneCallStatus = "Pending"; 
+    }
 
     const result = await allOrders.insertOne(order);
     
+    // ============================================================
+    // --- FIX: AUTO-DELETE FROM ABANDONED ORDERS ---
+    // ============================================================
+    // Since the order is now successfully submitted, we remove the 
+    // "draft" version from the partialOrders collection so it doesn't 
+    // show up as abandoned anymore.
+    
+    if (order.number) {
+        try {
+            await partialOrders.deleteMany({
+                $or: [
+                    { number: order.number },             // Matches if saved at root
+                    { "marketing.number": order.number }, // Matches if saved inside marketing obj
+                    { phone: order.number }               // Fallback check
+                ]
+            });
+            
+            // If your checkout sends deviceId, clean that specific session too
+            if (order.deviceId) {
+                await partialOrders.deleteMany({ deviceId: order.deviceId });
+            }
+        } catch (cleanupError) {
+            console.log("Error cleaning up partial orders:", cleanupError);
+            // We don't fail the request here, just log the error
+        }
+    }
+    // ============================================================
+
     res.send({ success: true, message: "Order placed", orderId: generatedOrderId, mongoResult: result });
 
   } catch (error) {
@@ -90,6 +117,7 @@ app.post("/orders", async (req, res) => {
     res.status(500).send({ success: false, message: "Server Error" });
   }
 });
+
 
 app.get("/orders", async (req, res) => {
   try {
@@ -197,6 +225,17 @@ app.get("/partial-orders", async (req, res) => {
   }
 });
 
+app.delete("/partial-orders/:id", async (req, res) => {
+  const id = req.params.id;
+  try {
+    const filter = { _id: new ObjectId(id) };
+    const result = await partialOrders.deleteOne(filter);
+    res.send(result);
+  } catch (error) {
+    console.log(error);
+    res.status(500).send({ message: "Error deleting partial order" });
+  }
+});
 
 app.listen(port, () => {  
     console.log(`server is running ${port}`);
