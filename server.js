@@ -211,11 +211,9 @@ app.post("/save-partial-order", async (req, res) => {
 // --- NEW ROUTE: GET PARTIAL ORDERS (View Abandoned Carts) ---
 app.get("/partial-orders", async (req, res) => {
   try {
-    // 1. Find all records in the 'partialOrders' collection
-    // 2. Sort by 'lastUpdated' in descending order (-1) so the newest ones show first
     const result = await partialOrders
       .find({})
-      .sort({ lastUpdated: -1 }) 
+      .sort({ _id: -1 }) // newest at top
       .toArray();
 
     res.send(result);
@@ -224,6 +222,7 @@ app.get("/partial-orders", async (req, res) => {
     res.status(500).send({ message: "Error fetching data" });
   }
 });
+
 
 app.delete("/partial-orders/:id", async (req, res) => {
   const id = req.params.id;
