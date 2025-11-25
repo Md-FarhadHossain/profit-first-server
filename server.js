@@ -310,6 +310,37 @@ app.patch("/orders/:id/note", async (req, res) => {
   }
 });
 
+// PATCH endpoint to update just the total price (totalValue)
+app.patch("/orders/:id/price", async (req, res) => {
+  const { id } = req.params;
+  const { totalValue } = req.body;
+
+  try {
+    // Ensure the value is a number
+    const numericValue = Number(totalValue);
+    
+    if (isNaN(numericValue)) {
+      return res.status(400).json({ success: false, message: "Invalid price format" });
+    }
+
+    const filter = { _id: new ObjectId(id) }; // or just { _id: id } depending on your setup
+    const updateDoc = {
+      $set: { totalValue: numericValue },
+    };
+
+    const result = await ordersCollection.updateOne(filter, updateDoc);
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ success: false, message: "Order not found" });
+    }
+
+    res.json({ success: true, message: "Price updated successfully" });
+  } catch (error) {
+    console.error("Error updating price:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
 app.listen(port, () => {  
     console.log(`server is running ${port}`);
 });
