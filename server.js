@@ -289,32 +289,24 @@ app.post("/orders/:id/move-to-abandoned", async (req, res) => {
   }
 });
 
+// --- NEW ROUTE: Update Order Note ---
+app.patch("/orders/:id/note", async (req, res) => {
+  const id = req.params.id;
+  const { note } = req.body;
 
-// Update Order Note
-app.patch('/orders/:id/note', async (req, res) => {
   try {
-    const { id } = req.params;
-    const { note } = req.body;
+    const filter = { _id: new ObjectId(id) };
+    const updateDoc = {
+      $set: {
+        note: note // specific field for notes
+      },
+    };
 
-    // Validate ID format if using Mongo ObjectId
-    if (!id.match(/^[0-9a-fA-F]{24}$/)) {
-        // If your ID is not a Mongo ID, remove this check
-    }
-
-    const updatedOrder = await OrderCollection.findByIdAndUpdate(
-      id,
-      { $set: { note: note } },
-      { new: true } // Return the updated document
-    );
-
-    if (!updatedOrder) {
-      return res.status(404).json({ success: false, message: "Order not found" });
-    }
-
-    res.json({ success: true, message: "Note updated", data: updatedOrder });
+    const result = await allOrders.updateOne(filter, updateDoc);
+    res.send(result);
   } catch (error) {
-    console.error("Error updating note:", error);
-    res.status(500).json({ success: false, message: "Server error" });
+    console.log(error);
+    res.status(500).send({ message: "Error updating note" });
   }
 });
 
