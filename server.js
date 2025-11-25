@@ -85,10 +85,6 @@ app.post("/orders", async (req, res) => {
     // ============================================================
     // --- FIX: AUTO-DELETE FROM ABANDONED ORDERS ---
     // ============================================================
-    // Since the order is now successfully submitted, we remove the 
-    // "draft" version from the partialOrders collection so it doesn't 
-    // show up as abandoned anymore.
-    
     if (order.number) {
         try {
             await partialOrders.deleteMany({
@@ -105,7 +101,6 @@ app.post("/orders", async (req, res) => {
             }
         } catch (cleanupError) {
             console.log("Error cleaning up partial orders:", cleanupError);
-            // We don't fail the request here, just log the error
         }
     }
     // ============================================================
@@ -188,6 +183,49 @@ app.patch("/orders/:id/call-status", async (req, res) => {
   }
 });
 
+// --- NEW ROUTE: Update Shipping Method (Added for completeness) ---
+app.patch("/orders/:id/shipping-method", async (req, res) => {
+  const id = req.params.id;
+  // Frontend sends 'shippingMethod' but your DB uses 'shipping'
+  const { shippingMethod, shippingCost } = req.body;
+
+  try {
+    const filter = { _id: new ObjectId(id) };
+    const updateDoc = {
+      $set: {
+        shipping: shippingMethod, 
+        shippingCost: shippingCost
+      },
+    };
+
+    const result = await allOrders.updateOne(filter, updateDoc);
+    res.send(result);
+  } catch (error) {
+    console.log(error);
+    res.status(500).send({ message: "Error updating shipping method" });
+  }
+});
+
+// --- NEW ROUTE: Update Price (REQUESTED) ---
+app.patch("/orders/:id/price", async (req, res) => {
+  const id = req.params.id;
+  const { totalValue } = req.body;
+
+  try {
+    const filter = { _id: new ObjectId(id) };
+    const updateDoc = {
+      $set: {
+        totalValue: totalValue
+      },
+    };
+
+    const result = await allOrders.updateOne(filter, updateDoc);
+    res.send(result);
+  } catch (error) {
+    console.log(error);
+    res.status(500).send({ message: "Error updating price" });
+  }
+});
 
 // --- NEW ROUTE: SAVE PARTIAL DATA (ABANDONED CART) ---
 app.post("/save-partial-order", async (req, res) => {
@@ -198,22 +236,19 @@ app.post("/save-partial-order", async (req, res) => {
       return res.status(400).send({ success: false, message: "Device ID required" });
     }
 
-    // We identify the user by their 'deviceId'. 
-    // If they come back 1 hour later on the same phone, we update the same record.
     const filter = { deviceId: deviceId };
     
     const updateDoc = {
       $set: {
         ...data,
-        lastUpdated: new Date(), // So you know when they last typed
-        status: "Abandoned"      // distinct from "Processing"
+        lastUpdated: new Date(),
+        status: "Abandoned"
       },
       $setOnInsert: {
-        createdAt: new Date()    // Only set this when creating new
+        createdAt: new Date()
       }
     };
 
-    // upsert: true -> Create if not exists, Update if exists
     const result = await partialOrders.updateOne(filter, updateDoc, { upsert: true });
 
     res.send({ success: true, result });
@@ -230,7 +265,7 @@ app.get("/partial-orders", async (req, res) => {
   try {
     const result = await partialOrders
       .find({})
-      .sort({ _id: -1 }) // newest at top
+      .sort({ _id: -1 })
       .toArray();
 
     res.send(result);
@@ -265,8 +300,6 @@ app.post("/orders/:id/move-to-abandoned", async (req, res) => {
     }
 
     // 2. Prepare data for Partial Orders
-    // We strip the _id to create a new document in partialOrders
-    // We force the status to 'Abandoned'
     const abandonedOrder = {
         ...order,
         _id: undefined, // Let MongoDB generate a fresh ID
@@ -298,7 +331,7 @@ app.patch("/orders/:id/note", async (req, res) => {
     const filter = { _id: new ObjectId(id) };
     const updateDoc = {
       $set: {
-        note: note // specific field for notes
+        note: note
       },
     };
 
@@ -310,36 +343,6 @@ app.patch("/orders/:id/note", async (req, res) => {
   }
 });
 
-// PATCH endpoint to update just the total price (totalValue)
-app.patch("/orders/:id/price", async (req, res) => {
-  const { id } = req.params;
-  const { totalValue } = req.body;
-
-  try {
-    // Ensure the value is a number
-    const numericValue = Number(totalValue);
-    
-    if (isNaN(numericValue)) {
-      return res.status(400).json({ success: false, message: "Invalid price format" });
-    }
-
-    const filter = { _id: new ObjectId(id) }; // or just { _id: id } depending on your setup
-    const updateDoc = {
-      $set: { totalValue: numericValue },
-    };
-
-    const result = await ordersCollection.updateOne(filter, updateDoc);
-
-    if (result.matchedCount === 0) {
-      return res.status(404).json({ success: false, message: "Order not found" });
-    }
-
-    res.json({ success: true, message: "Price updated successfully" });
-  } catch (error) {
-    console.error("Error updating price:", error);
-    res.status(500).json({ success: false, message: "Internal server error" });
-  }
-});
 
 app.listen(port, () => {  
     console.log(`server is running ${port}`);
