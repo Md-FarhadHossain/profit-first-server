@@ -289,6 +289,35 @@ app.post("/orders/:id/move-to-abandoned", async (req, res) => {
   }
 });
 
+
+// Update Order Note
+app.patch('/orders/:id/note', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { note } = req.body;
+
+    // Validate ID format if using Mongo ObjectId
+    if (!id.match(/^[0-9a-fA-F]{24}$/)) {
+        // If your ID is not a Mongo ID, remove this check
+    }
+
+    const updatedOrder = await OrderCollection.findByIdAndUpdate(
+      id,
+      { $set: { note: note } },
+      { new: true } // Return the updated document
+    );
+
+    if (!updatedOrder) {
+      return res.status(404).json({ success: false, message: "Order not found" });
+    }
+
+    res.json({ success: true, message: "Note updated", data: updatedOrder });
+  } catch (error) {
+    console.error("Error updating note:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 app.listen(port, () => {  
     console.log(`server is running ${port}`);
 });
