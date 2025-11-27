@@ -32,7 +32,6 @@ dbConnect();
 // --- COLLECTIONS ---
 const allOrders = client.db("profit-first").collection("allOrders");
 const partialOrders = client.db("profit-first").collection("partialOrders");
-// 1. NEW COLLECTION FOR BLACKLIST
 const blockedUsers = client.db("profit-first").collection("blockedUsers"); 
 
 
@@ -40,33 +39,43 @@ app.get('/', (req, res) => {
     res.send("Hi");
 });
 
-// --- UPDATED POST ROUTE WITH SECURITY BLOCKING ---
+// --- UPDATED POST ROUTE WITH ROBUST SECURITY BLOCKING ---
 app.post("/orders", async (req, res) => {
   try {
     const order = req.body;
 
     // ============================================================
-    // 0. SECURITY: BLOCK SCAMMERS (Device ID & Phone Number)
+    // 0. SECURITY: BLOCK SCAMMERS (Device ID, Phone & IP)
     // ============================================================
-    // We look for the ID in clientInfo (from your screenshot) or root level
+    // 1. Clean Inputs: Trim whitespace to ensure exact matches
     const targetDeviceId = order.clientInfo?.deviceId || order.deviceId; 
-    const targetPhone = order.number;
+    const targetPhone = order.number ? String(order.number).trim() : null;
+    const targetIp = order.clientInfo?.ip; // Now checking IP as well
 
-    // Construct query: Is the Device ID OR Phone Number in our blacklist?
+    // 2. Debug Log: See what is being checked in your terminal
+    console.log("🛡️ Checking Blocklist for:", { 
+        device: targetDeviceId, 
+        phone: targetPhone, 
+        ip: targetIp 
+    });
+
+    // 3. Construct Query
     const blockQuery = {
         $or: []
     };
 
     if (targetDeviceId) blockQuery.$or.push({ identifier: targetDeviceId });
     if (targetPhone) blockQuery.$or.push({ identifier: targetPhone });
+    if (targetIp) blockQuery.$or.push({ identifier: targetIp }); // Check IP
 
-    // Only run check if we have something to check
+    // 4. Run Check
     if (blockQuery.$or.length > 0) {
         const isBanned = await blockedUsers.findOne(blockQuery);
         
         if (isBanned) {
-            console.log(`Blocked attempt from: ${isBanned.identifier} (${isBanned.reason})`);
-            // Return 403 Forbidden - Frontend should handle this and show a generic error
+            console.log(`❌ BLOCKED: Match found for ${isBanned.identifier} (${isBanned.note})`);
+            
+            // Return 403 Forbidden
             return res.status(403).send({ 
                 success: false, 
                 message: "System declined this order due to security policies." 
@@ -78,7 +87,7 @@ app.post("/orders", async (req, res) => {
 
     // 1. SECURITY: CHECK FOR DUPLICATE ACTIVE ORDERS
     const existingOrder = await allOrders.findOne({
-      number: order.number,
+      number: targetPhone, // Use the trimmed number
       status: { 
         $nin: ["Delivered", "Cancelled", "Returned", "Return", "Cancel"] 
       } 
@@ -93,7 +102,7 @@ app.post("/orders", async (req, res) => {
     }
 
     // 2. ANALYTICS: CHECK FOR RECURRING CUSTOMER HISTORY
-    const previousOrderCount = await allOrders.countDocuments({ number: order.number });
+    const previousOrderCount = await allOrders.countDocuments({ number: targetPhone });
 
     // 3. ENRICH DATA
     order.customerStats = {
@@ -108,6 +117,7 @@ app.post("/orders", async (req, res) => {
 
     order.orderId = generatedOrderId;
     order.createdAt = new Date(); 
+    order.number = targetPhone; // Save the trimmed number
     
     // Set default call status if not provided
     if (!order.phoneCallStatus) {
@@ -119,17 +129,16 @@ app.post("/orders", async (req, res) => {
     // ============================================================
     // --- FIX: AUTO-DELETE FROM ABANDONED ORDERS ---
     // ============================================================
-    if (order.number) {
+    if (targetPhone) {
         try {
             await partialOrders.deleteMany({
                 $or: [
-                    { number: order.number },             // Matches if saved at root
-                    { "marketing.number": order.number }, // Matches if saved inside marketing obj
-                    { phone: order.number }               // Fallback check
+                    { number: targetPhone },              
+                    { "marketing.number": targetPhone }, 
+                    { phone: targetPhone }                
                 ]
             });
             
-            // If your checkout sends deviceId, clean that specific session too
             if (targetDeviceId) {
                 await partialOrders.deleteMany({ deviceId: targetDeviceId });
             }
@@ -217,10 +226,9 @@ app.patch("/orders/:id/call-status", async (req, res) => {
   }
 });
 
-// --- NEW ROUTE: Update Shipping Method (Added for completeness) ---
+// --- NEW ROUTE: Update Shipping Method ---
 app.patch("/orders/:id/shipping-method", async (req, res) => {
   const id = req.params.id;
-  // Frontend sends 'shippingMethod' but your DB uses 'shipping'
   const { shippingMethod, shippingCost } = req.body;
 
   try {
@@ -240,7 +248,7 @@ app.patch("/orders/:id/shipping-method", async (req, res) => {
   }
 });
 
-// --- NEW ROUTE: Update Price (REQUESTED) ---
+// --- NEW ROUTE: Update Price ---
 app.patch("/orders/:id/price", async (req, res) => {
   const id = req.params.id;
   const { totalValue } = req.body;
@@ -294,7 +302,7 @@ app.post("/save-partial-order", async (req, res) => {
 });
 
 
-// --- NEW ROUTE: GET PARTIAL ORDERS (View Abandoned Carts) ---
+// --- NEW ROUTE: GET PARTIAL ORDERS ---
 app.get("/partial-orders", async (req, res) => {
   try {
     const result = await partialOrders
@@ -323,29 +331,24 @@ app.delete("/partial-orders/:id", async (req, res) => {
 });
 
 
-// --- NEW ROUTE: REVERSE MIGRATION (Active -> Abandoned) ---
+// --- NEW ROUTE: REVERSE MIGRATION ---
 app.post("/orders/:id/move-to-abandoned", async (req, res) => {
   const id = req.params.id;
   try {
-    // 1. Find the order in Active Orders
     const order = await allOrders.findOne({ _id: new ObjectId(id) });
     if (!order) {
         return res.status(404).send({ success: false, message: "Order not found" });
     }
 
-    // 2. Prepare data for Partial Orders
     const abandonedOrder = {
         ...order,
-        _id: undefined, // Let MongoDB generate a fresh ID
+        _id: undefined, 
         status: "Abandoned", 
         movedFromActive: true,
         restoredAt: new Date()
     };
 
-    // 3. Insert into Partial Orders
     await partialOrders.insertOne(abandonedOrder);
-
-    // 4. Delete from Active Orders
     await allOrders.deleteOne({ _id: new ObjectId(id) });
 
     res.send({ success: true, message: "Order moved to Abandoned" });
@@ -382,14 +385,16 @@ app.patch("/orders/:id/note", async (req, res) => {
 // --- NEW ADMIN ROUTES FOR BLOCKING SCAMMERS ---
 // ============================================================
 
-// 1. Manually Block a User (Send 'identifier' = deviceId or phoneNumber)
+// 1. Manually Block a User
 app.post("/admin/block-user", async (req, res) => {
     try {
-        const { identifier, note } = req.body; // identifier can be deviceId OR phone number
+        let { identifier, note } = req.body; 
         
         if (!identifier) return res.status(400).send({message: "Identifier required"});
 
-        // Check if already blocked
+        // CLEAN THE IDENTIFIER (Trim whitespace)
+        identifier = String(identifier).trim();
+
         const exists = await blockedUsers.findOne({ identifier: identifier });
         if (exists) return res.status(400).send({message: "User already blocked"});
 
@@ -417,7 +422,7 @@ app.get("/admin/blocked-users", async (req, res) => {
     }
 });
 
-// 3. Unblock User (Remove from blacklist)
+// 3. Unblock User
 app.delete("/admin/blocked-users/:identifier", async (req, res) => {
     try {
         const identifier = req.params.identifier;
