@@ -39,58 +39,73 @@ app.get('/', (req, res) => {
     res.send("Hi");
 });
 
-// --- UPDATED POST ROUTE WITH ROBUST SECURITY BLOCKING ---
+// ============================================================
+// --- NEW ROUTE: PRE-CHECK BAN STATUS (The Gatekeeper) ---
+// ============================================================
+app.get("/check-ban-status", async (req, res) => {
+    try {
+        const { ip, deviceId } = req.query;
+        
+        const query = { $or: [] };
+        
+        // Add checks if values exist
+        if (ip && ip !== 'undefined' && ip !== 'null') query.$or.push({ identifier: ip });
+        if (deviceId && deviceId !== 'undefined' && deviceId !== 'null') query.$or.push({ identifier: deviceId });
+
+        // If no valid identifiers provided, they aren't banned
+        if (query.$or.length === 0) {
+            return res.send({ banned: false });
+        }
+
+        const isBanned = await blockedUsers.findOne(query);
+
+        if (isBanned) {
+            console.log(`⛔ BAN CHECK: Blocked user attempted access (${isBanned.identifier})`);
+            return res.send({ banned: true, reason: isBanned.note });
+        }
+
+        res.send({ banned: false });
+    } catch (error) {
+        console.error("Ban check error:", error);
+        res.status(500).send({ banned: false }); // Fail open to not block real users on error
+    }
+});
+// ============================================================
+
+
+// --- UPDATED POST ROUTE ---
 app.post("/orders", async (req, res) => {
   try {
     const order = req.body;
 
-    // ============================================================
-    // 0. SECURITY: BLOCK SCAMMERS (Device ID, Phone & IP)
-    // ============================================================
-    // 1. Clean Inputs: Trim whitespace to ensure exact matches
+    // 0. SECURITY: BLOCK SCAMMERS
     const targetDeviceId = order.clientInfo?.deviceId || order.deviceId; 
     const targetPhone = order.number ? String(order.number).trim() : null;
-    const targetIp = order.clientInfo?.ip; // Now checking IP as well
+    const targetIp = order.clientInfo?.ip; 
 
-    // 2. Debug Log: See what is being checked in your terminal
-    console.log("🛡️ Checking Blocklist for:", { 
-        device: targetDeviceId, 
-        phone: targetPhone, 
-        ip: targetIp 
-    });
+    console.log("🛡️ Processing Order Check:", { device: targetDeviceId, phone: targetPhone, ip: targetIp });
 
-    // 3. Construct Query
-    const blockQuery = {
-        $or: []
-    };
-
+    const blockQuery = { $or: [] };
     if (targetDeviceId) blockQuery.$or.push({ identifier: targetDeviceId });
     if (targetPhone) blockQuery.$or.push({ identifier: targetPhone });
-    if (targetIp) blockQuery.$or.push({ identifier: targetIp }); // Check IP
+    if (targetIp) blockQuery.$or.push({ identifier: targetIp }); 
 
-    // 4. Run Check
     if (blockQuery.$or.length > 0) {
         const isBanned = await blockedUsers.findOne(blockQuery);
         
         if (isBanned) {
-            console.log(`❌ BLOCKED: Match found for ${isBanned.identifier} (${isBanned.note})`);
-            
-            // Return 403 Forbidden
+            console.log(`❌ BLOCKED ORDER: ${isBanned.identifier}`);
             return res.status(403).send({ 
                 success: false, 
                 message: "System declined this order due to security policies." 
             });
         }
     }
-    // ============================================================
 
-
-    // 1. SECURITY: CHECK FOR DUPLICATE ACTIVE ORDERS
+    // 1. DUPLICATE CHECK
     const existingOrder = await allOrders.findOne({
-      number: targetPhone, // Use the trimmed number
-      status: { 
-        $nin: ["Delivered", "Cancelled", "Returned", "Return", "Cancel"] 
-      } 
+      number: targetPhone, 
+      status: { $nin: ["Delivered", "Cancelled", "Returned", "Return", "Cancel"] } 
     });
 
     if (existingOrder) {
@@ -101,7 +116,7 @@ app.post("/orders", async (req, res) => {
       });
     }
 
-    // 2. ANALYTICS: CHECK FOR RECURRING CUSTOMER HISTORY
+    // 2. ANALYTICS
     const previousOrderCount = await allOrders.countDocuments({ number: targetPhone });
 
     // 3. ENRICH DATA
@@ -111,24 +126,19 @@ app.post("/orders", async (req, res) => {
         customerType: previousOrderCount > 0 ? "Returning" : "New"
     };
 
-    // 4. GENERATE ORDER ID & SAVE
+    // 4. GENERATE ID & SAVE
     const count = await allOrders.countDocuments();
     const generatedOrderId = 501 + count;
 
     order.orderId = generatedOrderId;
     order.createdAt = new Date(); 
-    order.number = targetPhone; // Save the trimmed number
+    order.number = targetPhone; 
     
-    // Set default call status if not provided
-    if (!order.phoneCallStatus) {
-        order.phoneCallStatus = "Pending"; 
-    }
+    if (!order.phoneCallStatus) order.phoneCallStatus = "Pending"; 
 
     const result = await allOrders.insertOne(order);
     
-    // ============================================================
-    // --- FIX: AUTO-DELETE FROM ABANDONED ORDERS ---
-    // ============================================================
+    // CLEANUP
     if (targetPhone) {
         try {
             await partialOrders.deleteMany({
@@ -138,15 +148,11 @@ app.post("/orders", async (req, res) => {
                     { phone: targetPhone }                
                 ]
             });
-            
-            if (targetDeviceId) {
-                await partialOrders.deleteMany({ deviceId: targetDeviceId });
-            }
+            if (targetDeviceId) await partialOrders.deleteMany({ deviceId: targetDeviceId });
         } catch (cleanupError) {
             console.log("Error cleaning up partial orders:", cleanupError);
         }
     }
-    // ============================================================
 
     res.send({ success: true, message: "Order placed", orderId: generatedOrderId, mongoResult: result });
 
@@ -168,7 +174,6 @@ app.get("/orders", async (req, res) => {
   }
 });
 
-// --- UPDATED ROUTE: Update Order Status & Save Timestamps ---
 app.patch("/orders/:id", async (req, res) => {
   const id = req.params.id;
   const { status } = req.body;
@@ -176,28 +181,14 @@ app.patch("/orders/:id", async (req, res) => {
 
   try {
     const filter = { _id: new ObjectId(id) };
-    
-    // Base update: always update status
-    let updateFields = {
-      status: status
-    };
+    let updateFields = { status: status };
 
-    // Add specific timestamps based on status
-    if (status === "Shipped") {
-        updateFields.shippedAt = now;
-    } else if (status === "Delivered") {
-        updateFields.deliveredAt = now;
-    } else if (status === "Cancelled") {
-        updateFields.cancelledAt = now;
-    } else if (status === "Returned") {
-        updateFields.returnedAt = now;
-    }
+    if (status === "Shipped") updateFields.shippedAt = now;
+    else if (status === "Delivered") updateFields.deliveredAt = now;
+    else if (status === "Cancelled") updateFields.cancelledAt = now;
+    else if (status === "Returned") updateFields.returnedAt = now;
 
-    const updateDoc = {
-      $set: updateFields,
-    };
-
-    const result = await allOrders.updateOne(filter, updateDoc);
+    const result = await allOrders.updateOne(filter, { $set: updateFields });
     res.send(result);
   } catch (error) {
     console.log(error);
@@ -205,20 +196,11 @@ app.patch("/orders/:id", async (req, res) => {
   }
 });
 
-// --- NEW ROUTE: Update Call Status ---
 app.patch("/orders/:id/call-status", async (req, res) => {
   const id = req.params.id;
   const { callStatus } = req.body;
-
   try {
-    const filter = { _id: new ObjectId(id) };
-    const updateDoc = {
-      $set: {
-        phoneCallStatus: callStatus 
-      },
-    };
-
-    const result = await allOrders.updateOne(filter, updateDoc);
+    const result = await allOrders.updateOne({ _id: new ObjectId(id) }, { $set: { phoneCallStatus: callStatus } });
     res.send(result);
   } catch (error) {
     console.log(error);
@@ -226,21 +208,11 @@ app.patch("/orders/:id/call-status", async (req, res) => {
   }
 });
 
-// --- NEW ROUTE: Update Shipping Method ---
 app.patch("/orders/:id/shipping-method", async (req, res) => {
   const id = req.params.id;
   const { shippingMethod, shippingCost } = req.body;
-
   try {
-    const filter = { _id: new ObjectId(id) };
-    const updateDoc = {
-      $set: {
-        shipping: shippingMethod, 
-        shippingCost: shippingCost
-      },
-    };
-
-    const result = await allOrders.updateOne(filter, updateDoc);
+    const result = await allOrders.updateOne({ _id: new ObjectId(id) }, { $set: { shipping: shippingMethod, shippingCost: shippingCost } });
     res.send(result);
   } catch (error) {
     console.log(error);
@@ -248,20 +220,11 @@ app.patch("/orders/:id/shipping-method", async (req, res) => {
   }
 });
 
-// --- NEW ROUTE: Update Price ---
 app.patch("/orders/:id/price", async (req, res) => {
   const id = req.params.id;
   const { totalValue } = req.body;
-
   try {
-    const filter = { _id: new ObjectId(id) };
-    const updateDoc = {
-      $set: {
-        totalValue: totalValue
-      },
-    };
-
-    const result = await allOrders.updateOne(filter, updateDoc);
+    const result = await allOrders.updateOne({ _id: new ObjectId(id) }, { $set: { totalValue: totalValue } });
     res.send(result);
   } catch (error) {
     console.log(error);
@@ -269,47 +232,27 @@ app.patch("/orders/:id/price", async (req, res) => {
   }
 });
 
-// --- NEW ROUTE: SAVE PARTIAL DATA (ABANDONED CART) ---
 app.post("/save-partial-order", async (req, res) => {
   try {
     const { deviceId, ...data } = req.body;
-
-    if (!deviceId) {
-      return res.status(400).send({ success: false, message: "Device ID required" });
-    }
+    if (!deviceId) return res.status(400).send({ success: false, message: "Device ID required" });
 
     const filter = { deviceId: deviceId };
-    
     const updateDoc = {
-      $set: {
-        ...data,
-        lastUpdated: new Date(),
-        status: "Abandoned"
-      },
-      $setOnInsert: {
-        createdAt: new Date()
-      }
+      $set: { ...data, lastUpdated: new Date(), status: "Abandoned" },
+      $setOnInsert: { createdAt: new Date() }
     };
-
     const result = await partialOrders.updateOne(filter, updateDoc, { upsert: true });
-
     res.send({ success: true, result });
-
   } catch (error) {
     console.error("Partial Save Error:", error);
     res.status(500).send({ success: false });
   }
 });
 
-
-// --- NEW ROUTE: GET PARTIAL ORDERS ---
 app.get("/partial-orders", async (req, res) => {
   try {
-    const result = await partialOrders
-      .find({})
-      .sort({ _id: -1 })
-      .toArray();
-
+    const result = await partialOrders.find({}).sort({ _id: -1 }).toArray();
     res.send(result);
   } catch (error) {
     console.error("Error fetching partial orders:", error);
@@ -317,12 +260,10 @@ app.get("/partial-orders", async (req, res) => {
   }
 });
 
-
 app.delete("/partial-orders/:id", async (req, res) => {
   const id = req.params.id;
   try {
-    const filter = { _id: new ObjectId(id) };
-    const result = await partialOrders.deleteOne(filter);
+    const result = await partialOrders.deleteOne({ _id: new ObjectId(id) });
     res.send(result);
   } catch (error) {
     console.log(error);
@@ -330,15 +271,11 @@ app.delete("/partial-orders/:id", async (req, res) => {
   }
 });
 
-
-// --- NEW ROUTE: REVERSE MIGRATION ---
 app.post("/orders/:id/move-to-abandoned", async (req, res) => {
   const id = req.params.id;
   try {
     const order = await allOrders.findOne({ _id: new ObjectId(id) });
-    if (!order) {
-        return res.status(404).send({ success: false, message: "Order not found" });
-    }
+    if (!order) return res.status(404).send({ success: false, message: "Order not found" });
 
     const abandonedOrder = {
         ...order,
@@ -350,29 +287,18 @@ app.post("/orders/:id/move-to-abandoned", async (req, res) => {
 
     await partialOrders.insertOne(abandonedOrder);
     await allOrders.deleteOne({ _id: new ObjectId(id) });
-
     res.send({ success: true, message: "Order moved to Abandoned" });
-
   } catch (error) {
     console.log("Reverse Migration Error:", error);
     res.status(500).send({ message: "Error moving order" });
   }
 });
 
-// --- NEW ROUTE: Update Order Note ---
 app.patch("/orders/:id/note", async (req, res) => {
   const id = req.params.id;
   const { note } = req.body;
-
   try {
-    const filter = { _id: new ObjectId(id) };
-    const updateDoc = {
-      $set: {
-        note: note
-      },
-    };
-
-    const result = await allOrders.updateOne(filter, updateDoc);
+    const result = await allOrders.updateOne({ _id: new ObjectId(id) }, { $set: { note: note } });
     res.send(result);
   } catch (error) {
     console.log(error);
@@ -380,30 +306,19 @@ app.patch("/orders/:id/note", async (req, res) => {
   }
 });
 
-
-// ============================================================
-// --- NEW ADMIN ROUTES FOR BLOCKING SCAMMERS ---
-// ============================================================
-
-// 1. Manually Block a User
+// ADMIN ROUTES
 app.post("/admin/block-user", async (req, res) => {
     try {
         let { identifier, note } = req.body; 
-        
         if (!identifier) return res.status(400).send({message: "Identifier required"});
-
-        // CLEAN THE IDENTIFIER (Trim whitespace)
+        
+        // Clean the identifier
         identifier = String(identifier).trim();
 
         const exists = await blockedUsers.findOne({ identifier: identifier });
         if (exists) return res.status(400).send({message: "User already blocked"});
 
-        const blockData = {
-            identifier: identifier,
-            note: note || "Blocked for spam",
-            blockedAt: new Date()
-        };
-
+        const blockData = { identifier: identifier, note: note || "Blocked for spam", blockedAt: new Date() };
         const result = await blockedUsers.insertOne(blockData);
         res.send({ success: true, message: "User blocked successfully", result });
     } catch (error) {
@@ -412,7 +327,6 @@ app.post("/admin/block-user", async (req, res) => {
     }
 });
 
-// 2. Get All Blocked Users
 app.get("/admin/blocked-users", async (req, res) => {
     try {
         const result = await blockedUsers.find({}).sort({ blockedAt: -1 }).toArray();
@@ -422,7 +336,6 @@ app.get("/admin/blocked-users", async (req, res) => {
     }
 });
 
-// 3. Unblock User
 app.delete("/admin/blocked-users/:identifier", async (req, res) => {
     try {
         const identifier = req.params.identifier;
@@ -432,8 +345,6 @@ app.delete("/admin/blocked-users/:identifier", async (req, res) => {
         res.status(500).send({ message: "Error unblocking user" });
     }
 });
-// ============================================================
-
 
 app.listen(port, () => {  
     console.log(`server is running ${port}`);
