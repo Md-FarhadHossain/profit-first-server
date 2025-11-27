@@ -29,18 +29,52 @@ const dbConnect = async () => {
 
 dbConnect();
 
+// --- COLLECTIONS ---
 const allOrders = client.db("profit-first").collection("allOrders");
 const partialOrders = client.db("profit-first").collection("partialOrders");
+// 1. NEW COLLECTION FOR BLACKLIST
+const blockedUsers = client.db("profit-first").collection("blockedUsers"); 
 
 
 app.get('/', (req, res) => {
     res.send("Hi");
 });
 
-// --- UPDATED POST ROUTE ---
+// --- UPDATED POST ROUTE WITH SECURITY BLOCKING ---
 app.post("/orders", async (req, res) => {
   try {
     const order = req.body;
+
+    // ============================================================
+    // 0. SECURITY: BLOCK SCAMMERS (Device ID & Phone Number)
+    // ============================================================
+    // We look for the ID in clientInfo (from your screenshot) or root level
+    const targetDeviceId = order.clientInfo?.deviceId || order.deviceId; 
+    const targetPhone = order.number;
+
+    // Construct query: Is the Device ID OR Phone Number in our blacklist?
+    const blockQuery = {
+        $or: []
+    };
+
+    if (targetDeviceId) blockQuery.$or.push({ identifier: targetDeviceId });
+    if (targetPhone) blockQuery.$or.push({ identifier: targetPhone });
+
+    // Only run check if we have something to check
+    if (blockQuery.$or.length > 0) {
+        const isBanned = await blockedUsers.findOne(blockQuery);
+        
+        if (isBanned) {
+            console.log(`Blocked attempt from: ${isBanned.identifier} (${isBanned.reason})`);
+            // Return 403 Forbidden - Frontend should handle this and show a generic error
+            return res.status(403).send({ 
+                success: false, 
+                message: "System declined this order due to security policies." 
+            });
+        }
+    }
+    // ============================================================
+
 
     // 1. SECURITY: CHECK FOR DUPLICATE ACTIVE ORDERS
     const existingOrder = await allOrders.findOne({
@@ -96,8 +130,8 @@ app.post("/orders", async (req, res) => {
             });
             
             // If your checkout sends deviceId, clean that specific session too
-            if (order.deviceId) {
-                await partialOrders.deleteMany({ deviceId: order.deviceId });
+            if (targetDeviceId) {
+                await partialOrders.deleteMany({ deviceId: targetDeviceId });
             }
         } catch (cleanupError) {
             console.log("Error cleaning up partial orders:", cleanupError);
@@ -342,6 +376,58 @@ app.patch("/orders/:id/note", async (req, res) => {
     res.status(500).send({ message: "Error updating note" });
   }
 });
+
+
+// ============================================================
+// --- NEW ADMIN ROUTES FOR BLOCKING SCAMMERS ---
+// ============================================================
+
+// 1. Manually Block a User (Send 'identifier' = deviceId or phoneNumber)
+app.post("/admin/block-user", async (req, res) => {
+    try {
+        const { identifier, note } = req.body; // identifier can be deviceId OR phone number
+        
+        if (!identifier) return res.status(400).send({message: "Identifier required"});
+
+        // Check if already blocked
+        const exists = await blockedUsers.findOne({ identifier: identifier });
+        if (exists) return res.status(400).send({message: "User already blocked"});
+
+        const blockData = {
+            identifier: identifier,
+            note: note || "Blocked for spam",
+            blockedAt: new Date()
+        };
+
+        const result = await blockedUsers.insertOne(blockData);
+        res.send({ success: true, message: "User blocked successfully", result });
+    } catch (error) {
+        console.log(error);
+        res.status(500).send({ message: "Error blocking user" });
+    }
+});
+
+// 2. Get All Blocked Users
+app.get("/admin/blocked-users", async (req, res) => {
+    try {
+        const result = await blockedUsers.find({}).sort({ blockedAt: -1 }).toArray();
+        res.send(result);
+    } catch (error) {
+        res.status(500).send({ message: "Error fetching blocked users" });
+    }
+});
+
+// 3. Unblock User (Remove from blacklist)
+app.delete("/admin/blocked-users/:identifier", async (req, res) => {
+    try {
+        const identifier = req.params.identifier;
+        const result = await blockedUsers.deleteOne({ identifier: identifier });
+        res.send(result);
+    } catch (error) {
+        res.status(500).send({ message: "Error unblocking user" });
+    }
+});
+// ============================================================
 
 
 app.listen(port, () => {  
