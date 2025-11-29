@@ -5,9 +5,6 @@ require("dotenv").config();
 const cors = require("cors");
 const port = 5000;
 
-// --- COURIER INTEGRATION: Import Routes ---
-const courierRoutes = require('./courier'); // Ensure path is correct
-
 app.use(express.json());
 app.use(cors());
 
@@ -37,23 +34,15 @@ const allOrders = client.db("profit-first").collection("allOrders");
 const partialOrders = client.db("profit-first").collection("partialOrders");
 const blockedUsers = client.db("profit-first").collection("blockedUsers"); 
 
-// --- COURIER INTEGRATION: Mount Routes ---
-// Pass the 'client' so the router can access the DB
-app.use('/courier', courierRoutes(client));
 
 app.get('/', (req, res) => {
     res.send("Hi");
 });
 
-// ... [REST OF YOUR EXISTING CODE REMAINS UNTOUCHED] ...
-// ... [Only paste the lines above into your existing index.js] ...
-// ... [Keep your existing app.listen at the bottom] ...
-
 // ============================================================
 // --- NEW ROUTE: PRE-CHECK BAN STATUS (The Gatekeeper) ---
 // ============================================================
 app.get("/check-ban-status", async (req, res) => {
-    // ... (Your existing code)
     try {
         const { ip, deviceId } = req.query;
         
@@ -146,12 +135,6 @@ app.post("/orders", async (req, res) => {
     order.number = targetPhone; 
     
     if (!order.phoneCallStatus) order.phoneCallStatus = "Pending"; 
-    
-    // --- COURIER INTEGRATION: Initialize Courier Fields ---
-    order.courierConsignmentId = null;
-    order.courierTrackingCode = null;
-    order.courierStatus = null;
-    // -----------------------------------------------------
 
     const result = await allOrders.insertOne(order);
     
