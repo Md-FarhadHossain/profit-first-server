@@ -349,6 +349,46 @@ app.post("/orders/:id/move-to-abandoned", async (req, res) => {
   }
 });
 
+// --- NEW ROUTE: MANUAL AI TRIGGER ---
+app.post("/orders/:id/analyze-location", async (req, res) => {
+    try {
+        const id = req.params.id;
+        // Use ObjectId if valid, otherwise handle as string ID if you use generated IDs differently
+        // Assuming mongo _id here based on previous routes
+        const query = ObjectId.isValid(id) ? { _id: new ObjectId(id) } : { orderId: parseInt(id) };
+        
+        const order = await allOrders.findOne(query);
+        
+        if (!order) return res.status(404).send({ success: false, message: "Order not found" });
+        if (!order.address) return res.status(400).send({ success: false, message: "No address to analyze" });
+
+        console.log("👆 Manual AI Analysis requested for:", order.orderId);
+        const locationDetails = await analyzeAddressWithAI(order.address);
+        
+        const updateDoc = {
+            $set: {
+                locationInfo: {
+                    district: locationDetails.district,
+                    thana: locationDetails.thana,
+                    aiProcessed: true
+                }
+            }
+        };
+
+        // Update based on the same query used to find it
+        await allOrders.updateOne(query, updateDoc);
+        
+        res.send({ 
+            success: true, 
+            data: locationDetails 
+        });
+
+    } catch (error) {
+        console.error("Manual AI Analysis Error:", error);
+        res.status(500).send({ success: false, message: "Analysis failed" });
+    }
+});
+
 app.patch("/orders/:id/note", async (req, res) => {
   const id = req.params.id;
   const { note } = req.body;
