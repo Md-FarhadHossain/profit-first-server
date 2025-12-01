@@ -18,6 +18,16 @@ const client = new MongoClient(uri, {
   }
 });
 
+// --- HELPER FUNCTIONS ---
+
+// Calculates total quantity whether items is a simple number or an array of objects
+const calculateItemQuantity = (items) => {
+    if (Array.isArray(items)) {
+        return items.reduce((acc, item) => acc + (Number(item.quantity) || 1), 0);
+    }
+    return Number(items) || 1;
+};
+
 // --- COLLECTIONS ---
 let allOrders, partialOrders, blockedUsers, expenses, settings;
 
@@ -110,7 +120,8 @@ app.patch("/orders/:id/restock-return", async (req, res) => {
     const order = await allOrders.findOne({ _id: new ObjectId(id) });
     if (!order) return res.status(404).send({ message: "Order not found" });
 
-    const itemsToRestock = order.items || 1; // Default to 1 if not set
+    // UPDATED: Use helper to handle both arrays and numbers
+    const itemsToRestock = calculateItemQuantity(order.items); 
 
     // Increment Global Stock
     await settings.updateOne(
@@ -248,8 +259,9 @@ app.patch("/orders/:id", async (req, res) => {
     const reductionStatuses = ["Shipped", "Delivered"];
     
     if (reductionStatuses.includes(status) && !currentOrder.inventoryDeducted) {
-        // Decrease global stock
-        const itemsToDeduct = currentOrder.items || 1;
+        // USE THE HELPER HERE (Handles Arrays & Numbers)
+        const itemsToDeduct = calculateItemQuantity(currentOrder.items);
+        
         await settings.updateOne(
             { _id: "main_stock" }, 
             { $inc: { quantity: -itemsToDeduct } }
@@ -348,7 +360,9 @@ app.post("/orders/:id/move-to-abandoned", async (req, res) => {
     // For simplicity, if you move to abandoned, we assume it never shipped. 
     // If it WAS shipped/deducted, we add stock back.
     if (order.inventoryDeducted) {
-         await settings.updateOne({ _id: "main_stock" }, { $inc: { quantity: (order.items || 1) } });
+         // UPDATED: Use helper to avoid crashing if items is an array
+         const itemsToReturn = calculateItemQuantity(order.items);
+         await settings.updateOne({ _id: "main_stock" }, { $inc: { quantity: itemsToReturn } });
     }
 
     const abandonedOrder = {
