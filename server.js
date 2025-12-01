@@ -18,28 +18,10 @@ const client = new MongoClient(uri, {
   }
 });
 
-// --- COLLECTIONS ---
-let allOrders, partialOrders, blockedUsers, expenses, settings;
-
 const dbConnect = async () => {
   try {
     await client.connect();
-    const db = client.db("profit-first");
-
-    allOrders = db.collection("allOrders");
-    partialOrders = db.collection("partialOrders");
-    blockedUsers = db.collection("blockedUsers");
-    expenses = db.collection("expenses"); // NEW: Stores Ad Spend, Packaging, etc.
-    settings = db.collection("settings"); // NEW: Stores Global Stock Count
-
-    // --- INITIALIZE STOCK IF NOT EXISTS ---
-    const stockCheck = await settings.findOne({ _id: "main_stock" });
-    if (!stockCheck) {
-      await settings.insertOne({ _id: "main_stock", quantity: 1000 });
-      console.log("⚙️ Initialized Stock to 1000");
-    }
-
-    console.log("Database connected & Collections ready");
+    console.log("Database connected");
   } catch (error) {
     console.log(error);
   }
@@ -47,105 +29,151 @@ const dbConnect = async () => {
 
 dbConnect();
 
+// --- COLLECTIONS ---
+const allOrders = client.db("profit-first").collection("allOrders");
+const partialOrders = client.db("profit-first").collection("partialOrders");
+const blockedUsers = client.db("profit-first").collection("blockedUsers"); 
+
+
 app.get('/', (req, res) => {
-    res.send("Hi from Profit First Server");
+    res.send("Hi");
 });
 
-
-
 // ============================================================
-// --- EXISTING ROUTES (WITH STOCK LOGIC UPDATES) ---
+// --- NEW ROUTE: PRE-CHECK BAN STATUS (The Gatekeeper) ---
 // ============================================================
-
 app.get("/check-ban-status", async (req, res) => {
     try {
         const { ip, deviceId } = req.query;
+        
         const query = { $or: [] };
+        
+        // Add checks if values exist
         if (ip && ip !== 'undefined' && ip !== 'null') query.$or.push({ identifier: ip });
         if (deviceId && deviceId !== 'undefined' && deviceId !== 'null') query.$or.push({ identifier: deviceId });
 
-        if (query.$or.length === 0) return res.send({ banned: false });
+        // If no valid identifiers provided, they aren't banned
+        if (query.$or.length === 0) {
+            return res.send({ banned: false });
+        }
 
         const isBanned = await blockedUsers.findOne(query);
-        if (isBanned) return res.send({ banned: true, reason: isBanned.note });
+
+        if (isBanned) {
+            console.log(`⛔ BAN CHECK: Blocked user attempted access (${isBanned.identifier})`);
+            return res.send({ banned: true, reason: isBanned.note });
+        }
 
         res.send({ banned: false });
     } catch (error) {
         console.error("Ban check error:", error);
-        res.status(500).send({ banned: false });
+        res.status(500).send({ banned: false }); // Fail open to not block real users on error
     }
 });
+// ============================================================
 
+
+// --- UPDATED POST ROUTE ---
 app.post("/orders", async (req, res) => {
   try {
     const order = req.body;
-    const targetDeviceId = order.clientInfo?.deviceId || order.deviceId;
-    const targetPhone = order.number ? String(order.number).trim() : null;
-    const targetIp = order.clientInfo?.ip;
 
-    // Security Checks...
+    // 0. SECURITY: BLOCK SCAMMERS
+    const targetDeviceId = order.clientInfo?.deviceId || order.deviceId; 
+    const targetPhone = order.number ? String(order.number).trim() : null;
+    const targetIp = order.clientInfo?.ip; 
+
+    console.log("🛡️ Processing Order Check:", { device: targetDeviceId, phone: targetPhone, ip: targetIp });
+
     const blockQuery = { $or: [] };
     if (targetDeviceId) blockQuery.$or.push({ identifier: targetDeviceId });
     if (targetPhone) blockQuery.$or.push({ identifier: targetPhone });
-    if (targetIp) blockQuery.$or.push({ identifier: targetIp });
+    if (targetIp) blockQuery.$or.push({ identifier: targetIp }); 
 
     if (blockQuery.$or.length > 0) {
         const isBanned = await blockedUsers.findOne(blockQuery);
-        if (isBanned) return res.status(403).send({ success: false, message: "Declined." });
+        
+        if (isBanned) {
+            console.log(`❌ BLOCKED ORDER: ${isBanned.identifier}`);
+            return res.status(403).send({ 
+                success: false, 
+                message: "System declined this order due to security policies." 
+            });
+        }
     }
 
+    // 1. DUPLICATE CHECK
     const existingOrder = await allOrders.findOne({
-      number: targetPhone,
-      status: { $nin: ["Delivered", "Cancelled", "Returned", "Return", "Cancel"] }
+      number: targetPhone, 
+      status: { $nin: ["Delivered", "Cancelled", "Returned", "Return", "Cancel"] } 
     });
 
     if (existingOrder) {
-      return res.status(409).send({ success: false, reason: "active_order_exists", message: "Order exists." });
+      return res.status(409).send({ 
+        success: false, 
+        reason: "active_order_exists", 
+        message: "Active order already exists for this number." 
+      });
     }
 
+    // 2. ANALYTICS
     const previousOrderCount = await allOrders.countDocuments({ number: targetPhone });
+
+    // 3. ENRICH DATA
     order.customerStats = {
         isReturningCustomer: previousOrderCount > 0,
         totalOrdersBeforeThis: previousOrderCount,
+        customerType: previousOrderCount > 0 ? "Returning" : "New"
     };
 
+    // 4. GENERATE ID & SAVE
     const count = await allOrders.countDocuments();
-    order.orderId = 501 + count;
-    order.createdAt = new Date();
-    order.number = targetPhone;
-    if (!order.phoneCallStatus) order.phoneCallStatus = "Pending";
+    const generatedOrderId = 501 + count;
+
+    order.orderId = generatedOrderId;
+    order.createdAt = new Date(); 
+    order.number = targetPhone; 
     
-    // ENSURE ITEM COUNT EXISTS (For Stock Logic)
-    order.items = order.items || 1;
-    order.inventoryDeducted = false; // Flag to track if we subtracted stock yet
+    if (!order.phoneCallStatus) order.phoneCallStatus = "Pending"; 
 
     const result = await allOrders.insertOne(order);
     
+    // CLEANUP
     if (targetPhone) {
         try {
             await partialOrders.deleteMany({
-                $or: [{ number: targetPhone }, { "marketing.number": targetPhone }, { phone: targetPhone }]
+                $or: [
+                    { number: targetPhone },              
+                    { "marketing.number": targetPhone }, 
+                    { phone: targetPhone }                
+                ]
             });
-        } catch (e) {}
+            if (targetDeviceId) await partialOrders.deleteMany({ deviceId: targetDeviceId });
+        } catch (cleanupError) {
+            console.log("Error cleaning up partial orders:", cleanupError);
+        }
     }
 
-    res.send({ success: true, message: "Order placed", orderId: order.orderId, mongoResult: result });
+    res.send({ success: true, message: "Order placed", orderId: generatedOrderId, mongoResult: result });
+
   } catch (error) {
-    console.log(error);
+    console.log(error.name, error.message);
     res.status(500).send({ success: false, message: "Server Error" });
   }
 });
 
+
 app.get("/orders", async (req, res) => {
   try {
-    const result = await allOrders.find({}).sort({ createdAt: -1 }).toArray();
+    const query = {};
+    const sort = { createdAt: -1 };
+    const result = await allOrders.find(query).sort(sort).toArray();
     res.send(result);
   } catch (error) {
     console.log(error);
   }
 });
 
-// --- UPDATED STATUS CHANGE (HANDLES STOCK DEDUCTION) ---
 app.patch("/orders/:id", async (req, res) => {
   const id = req.params.id;
   const { status } = req.body;
@@ -153,33 +181,12 @@ app.patch("/orders/:id", async (req, res) => {
 
   try {
     const filter = { _id: new ObjectId(id) };
-    const currentOrder = await allOrders.findOne(filter);
-    
-    if (!currentOrder) return res.status(404).send({ message: "Order not found" });
-
     let updateFields = { status: status };
 
-    // Set Timestamps
     if (status === "Shipped") updateFields.shippedAt = now;
     else if (status === "Delivered") updateFields.deliveredAt = now;
     else if (status === "Cancelled") updateFields.cancelledAt = now;
     else if (status === "Returned") updateFields.returnedAt = now;
-
-    // --- AUTOMATIC STOCK REDUCTION LOGIC ---
-    // If status becomes "Shipped" or "Delivered" AND we haven't deducted stock yet
-    const reductionStatuses = ["Shipped", "Delivered"];
-    
-    if (reductionStatuses.includes(status) && !currentOrder.inventoryDeducted) {
-        // Decrease global stock
-        const itemsToDeduct = currentOrder.items || 1;
-        await settings.updateOne(
-            { _id: "main_stock" },
-            { $inc: { quantity: -itemsToDeduct } }
-        );
-        // Mark order as deducted so we don't do it twice
-        updateFields.inventoryDeducted = true;
-    }
-    // ---------------------------------------
 
     const result = await allOrders.updateOne(filter, { $set: updateFields });
     res.send(result);
@@ -197,7 +204,7 @@ app.patch("/orders/:id/call-status", async (req, res) => {
     res.send(result);
   } catch (error) {
     console.log(error);
-    res.status(500).send({ message: "Error" });
+    res.status(500).send({ message: "Error updating call status" });
   }
 });
 
@@ -209,7 +216,7 @@ app.patch("/orders/:id/shipping-method", async (req, res) => {
     res.send(result);
   } catch (error) {
     console.log(error);
-    res.status(500).send({ message: "Error" });
+    res.status(500).send({ message: "Error updating shipping method" });
   }
 });
 
@@ -221,15 +228,15 @@ app.patch("/orders/:id/price", async (req, res) => {
     res.send(result);
   } catch (error) {
     console.log(error);
-    res.status(500).send({ message: "Error" });
+    res.status(500).send({ message: "Error updating price" });
   }
 });
 
-// Partial Orders Routes
 app.post("/save-partial-order", async (req, res) => {
   try {
     const { deviceId, ...data } = req.body;
     if (!deviceId) return res.status(400).send({ success: false, message: "Device ID required" });
+
     const filter = { deviceId: deviceId };
     const updateDoc = {
       $set: { ...data, lastUpdated: new Date(), status: "Abandoned" },
@@ -238,6 +245,7 @@ app.post("/save-partial-order", async (req, res) => {
     const result = await partialOrders.updateOne(filter, updateDoc, { upsert: true });
     res.send({ success: true, result });
   } catch (error) {
+    console.error("Partial Save Error:", error);
     res.status(500).send({ success: false });
   }
 });
@@ -247,16 +255,19 @@ app.get("/partial-orders", async (req, res) => {
     const result = await partialOrders.find({}).sort({ _id: -1 }).toArray();
     res.send(result);
   } catch (error) {
-    res.status(500).send({ message: "Error" });
+    console.error("Error fetching partial orders:", error);
+    res.status(500).send({ message: "Error fetching data" });
   }
 });
 
 app.delete("/partial-orders/:id", async (req, res) => {
+  const id = req.params.id;
   try {
-    const result = await partialOrders.deleteOne({ _id: new ObjectId(req.params.id) });
+    const result = await partialOrders.deleteOne({ _id: new ObjectId(id) });
     res.send(result);
   } catch (error) {
-    res.status(500).send({ message: "Error" });
+    console.log(error);
+    res.status(500).send({ message: "Error deleting partial order" });
   }
 });
 
@@ -266,17 +277,10 @@ app.post("/orders/:id/move-to-abandoned", async (req, res) => {
     const order = await allOrders.findOne({ _id: new ObjectId(id) });
     if (!order) return res.status(404).send({ success: false, message: "Order not found" });
 
-    // NOTE: If this order already deducted stock, should we add it back?
-    // For simplicity, if you move to abandoned, we assume it never shipped.
-    // If it WAS shipped/deducted, we add stock back.
-    if (order.inventoryDeducted) {
-         await settings.updateOne({ _id: "main_stock" }, { $inc: { quantity: (order.items || 1) } });
-    }
-
     const abandonedOrder = {
         ...order,
-        _id: undefined,
-        status: "Abandoned",
+        _id: undefined, 
+        status: "Abandoned", 
         movedFromActive: true,
         restoredAt: new Date()
     };
@@ -285,32 +289,41 @@ app.post("/orders/:id/move-to-abandoned", async (req, res) => {
     await allOrders.deleteOne({ _id: new ObjectId(id) });
     res.send({ success: true, message: "Order moved to Abandoned" });
   } catch (error) {
+    console.log("Reverse Migration Error:", error);
     res.status(500).send({ message: "Error moving order" });
   }
 });
 
 app.patch("/orders/:id/note", async (req, res) => {
+  const id = req.params.id;
+  const { note } = req.body;
   try {
-    const result = await allOrders.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { note: req.body.note } });
+    const result = await allOrders.updateOne({ _id: new ObjectId(id) }, { $set: { note: note } });
     res.send(result);
   } catch (error) {
-    res.status(500).send({ message: "Error" });
+    console.log(error);
+    res.status(500).send({ message: "Error updating note" });
   }
 });
 
-// Admin Routes
+// ADMIN ROUTES
 app.post("/admin/block-user", async (req, res) => {
     try {
-        let { identifier, note } = req.body;
+        let { identifier, note } = req.body; 
         if (!identifier) return res.status(400).send({message: "Identifier required"});
+        
+        // Clean the identifier
         identifier = String(identifier).trim();
+
         const exists = await blockedUsers.findOne({ identifier: identifier });
         if (exists) return res.status(400).send({message: "User already blocked"});
+
         const blockData = { identifier: identifier, note: note || "Blocked for spam", blockedAt: new Date() };
         const result = await blockedUsers.insertOne(blockData);
-        res.send({ success: true, message: "User blocked", result });
+        res.send({ success: true, message: "User blocked successfully", result });
     } catch (error) {
-        res.status(500).send({ message: "Error" });
+        console.log(error);
+        res.status(500).send({ message: "Error blocking user" });
     }
 });
 
@@ -319,16 +332,17 @@ app.get("/admin/blocked-users", async (req, res) => {
         const result = await blockedUsers.find({}).sort({ blockedAt: -1 }).toArray();
         res.send(result);
     } catch (error) {
-        res.status(500).send({ message: "Error" });
+        res.status(500).send({ message: "Error fetching blocked users" });
     }
 });
 
 app.delete("/admin/blocked-users/:identifier", async (req, res) => {
     try {
-        const result = await blockedUsers.deleteOne({ identifier: req.params.identifier });
+        const identifier = req.params.identifier;
+        const result = await blockedUsers.deleteOne({ identifier: identifier });
         res.send(result);
     } catch (error) {
-        res.status(500).send({ message: "Error" });
+        res.status(500).send({ message: "Error unblocking user" });
     }
 });
 
