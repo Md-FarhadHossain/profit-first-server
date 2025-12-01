@@ -25,7 +25,7 @@ const dbConnect = async () => {
   try {
     await client.connect();
     const db = client.db("profit-first");
-    
+
     allOrders = db.collection("allOrders");
     partialOrders = db.collection("partialOrders");
     blockedUsers = db.collection("blockedUsers");
@@ -51,85 +51,7 @@ app.get('/', (req, res) => {
     res.send("Hi from Profit First Server");
 });
 
-// ============================================================
-// --- NEW: FINANCE & STOCK ROUTES ---
-// ============================================================
 
-// 1. GET STOCK & EXPENSES (For Dashboard Analytics)
-app.get("/finance-summary", async (req, res) => {
-  try {
-    // Get Stock
-    const stockDoc = await settings.findOne({ _id: "main_stock" });
-    const currentStock = stockDoc ? stockDoc.quantity : 0;
-
-    // Get Expenses
-    const allExpenses = await expenses.find({}).sort({ date: -1 }).toArray();
-
-    res.send({ 
-      stock: currentStock, 
-      expenses: allExpenses 
-    });
-  } catch (error) {
-    console.log(error);
-    res.status(500).send({ message: "Error fetching finance data" });
-  }
-});
-
-// 2. ADD EXPENSE
-app.post("/expenses", async (req, res) => {
-  try {
-    const expense = req.body;
-    // Expecting: { type: "Ad Spend", amount: 500, desc: "...", date: "..." }
-    expense.date = new Date(expense.date); 
-    expense.createdAt = new Date();
-    
-    const result = await expenses.insertOne(expense);
-    res.send({ success: true, result });
-  } catch (error) {
-    console.log(error);
-    res.status(500).send({ message: "Error adding expense" });
-  }
-});
-
-// 3. DELETE EXPENSE
-app.delete("/expenses/:id", async (req, res) => {
-  try {
-    const id = req.params.id;
-    const result = await expenses.deleteOne({ _id: new ObjectId(id) });
-    res.send(result);
-  } catch (error) {
-    console.log(error);
-    res.status(500).send({ message: "Error deleting expense" });
-  }
-});
-
-// 4. MANUAL RESTOCK (For Returns/Cancellations from the Queue)
-app.patch("/orders/:id/restock-return", async (req, res) => {
-  const id = req.params.id;
-  try {
-    const order = await allOrders.findOne({ _id: new ObjectId(id) });
-    if (!order) return res.status(404).send({ message: "Order not found" });
-
-    const itemsToRestock = order.items || 1; // Default to 1 if not set
-
-    // Increment Global Stock
-    await settings.updateOne(
-      { _id: "main_stock" }, 
-      { $inc: { quantity: itemsToRestock } }
-    );
-
-    // Mark order as physically restocked so it doesn't appear in queue again
-    const result = await allOrders.updateOne(
-      { _id: new ObjectId(id) }, 
-      { $set: { isRestocked: true, restockedAt: new Date() } }
-    );
-
-    res.send({ success: true, message: "Stock updated successfully" });
-  } catch (error) {
-    console.log(error);
-    res.status(500).send({ message: "Error restocking" });
-  }
-});
 
 // ============================================================
 // --- EXISTING ROUTES (WITH STOCK LOGIC UPDATES) ---
@@ -157,15 +79,15 @@ app.get("/check-ban-status", async (req, res) => {
 app.post("/orders", async (req, res) => {
   try {
     const order = req.body;
-    const targetDeviceId = order.clientInfo?.deviceId || order.deviceId; 
+    const targetDeviceId = order.clientInfo?.deviceId || order.deviceId;
     const targetPhone = order.number ? String(order.number).trim() : null;
-    const targetIp = order.clientInfo?.ip; 
+    const targetIp = order.clientInfo?.ip;
 
     // Security Checks...
     const blockQuery = { $or: [] };
     if (targetDeviceId) blockQuery.$or.push({ identifier: targetDeviceId });
     if (targetPhone) blockQuery.$or.push({ identifier: targetPhone });
-    if (targetIp) blockQuery.$or.push({ identifier: targetIp }); 
+    if (targetIp) blockQuery.$or.push({ identifier: targetIp });
 
     if (blockQuery.$or.length > 0) {
         const isBanned = await blockedUsers.findOne(blockQuery);
@@ -173,8 +95,8 @@ app.post("/orders", async (req, res) => {
     }
 
     const existingOrder = await allOrders.findOne({
-      number: targetPhone, 
-      status: { $nin: ["Delivered", "Cancelled", "Returned", "Return", "Cancel"] } 
+      number: targetPhone,
+      status: { $nin: ["Delivered", "Cancelled", "Returned", "Return", "Cancel"] }
     });
 
     if (existingOrder) {
@@ -189,12 +111,12 @@ app.post("/orders", async (req, res) => {
 
     const count = await allOrders.countDocuments();
     order.orderId = 501 + count;
-    order.createdAt = new Date(); 
-    order.number = targetPhone; 
+    order.createdAt = new Date();
+    order.number = targetPhone;
     if (!order.phoneCallStatus) order.phoneCallStatus = "Pending";
     
     // ENSURE ITEM COUNT EXISTS (For Stock Logic)
-    order.items = order.items || 1; 
+    order.items = order.items || 1;
     order.inventoryDeducted = false; // Flag to track if we subtracted stock yet
 
     const result = await allOrders.insertOne(order);
@@ -251,7 +173,7 @@ app.patch("/orders/:id", async (req, res) => {
         // Decrease global stock
         const itemsToDeduct = currentOrder.items || 1;
         await settings.updateOne(
-            { _id: "main_stock" }, 
+            { _id: "main_stock" },
             { $inc: { quantity: -itemsToDeduct } }
         );
         // Mark order as deducted so we don't do it twice
@@ -345,7 +267,7 @@ app.post("/orders/:id/move-to-abandoned", async (req, res) => {
     if (!order) return res.status(404).send({ success: false, message: "Order not found" });
 
     // NOTE: If this order already deducted stock, should we add it back?
-    // For simplicity, if you move to abandoned, we assume it never shipped. 
+    // For simplicity, if you move to abandoned, we assume it never shipped.
     // If it WAS shipped/deducted, we add stock back.
     if (order.inventoryDeducted) {
          await settings.updateOne({ _id: "main_stock" }, { $inc: { quantity: (order.items || 1) } });
@@ -353,8 +275,8 @@ app.post("/orders/:id/move-to-abandoned", async (req, res) => {
 
     const abandonedOrder = {
         ...order,
-        _id: undefined, 
-        status: "Abandoned", 
+        _id: undefined,
+        status: "Abandoned",
         movedFromActive: true,
         restoredAt: new Date()
     };
@@ -379,7 +301,7 @@ app.patch("/orders/:id/note", async (req, res) => {
 // Admin Routes
 app.post("/admin/block-user", async (req, res) => {
     try {
-        let { identifier, note } = req.body; 
+        let { identifier, note } = req.body;
         if (!identifier) return res.status(400).send({message: "Identifier required"});
         identifier = String(identifier).trim();
         const exists = await blockedUsers.findOne({ identifier: identifier });
