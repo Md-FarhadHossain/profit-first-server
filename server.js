@@ -18,25 +18,6 @@ const client = new MongoClient(uri, {
   }
 });
 
-// --- HELPER: CALCULATE TOTAL ITEMS (Handles Numbers & Arrays) ---
-const getOrderQuantity = (items) => {
-  // 1. If it's an array (e.g., [{id:1, quantity:2}, {id:2, quantity:1}])
-  if (Array.isArray(items)) {
-    const total = items.reduce((sum, item) => {
-      // Use item.quantity if it exists, otherwise assume 1 per item object
-      const qty = item && item.quantity ? Number(item.quantity) : 1;
-      return sum + (isNaN(qty) ? 1 : qty);
-    }, 0);
-    // If array exists but calculation resulted in 0, return 1 as fallback
-    return total === 0 ? 1 : total;
-  }
-  
-  // 2. If it's just a number or string
-  const num = Number(items);
-  return isNaN(num) || num === 0 ? 1 : num;
-};
-// ---------------------------------------------------------------
-
 // --- COLLECTIONS ---
 let allOrders, partialOrders, blockedUsers, expenses, settings;
 
@@ -48,8 +29,8 @@ const dbConnect = async () => {
     allOrders = db.collection("allOrders");
     partialOrders = db.collection("partialOrders");
     blockedUsers = db.collection("blockedUsers");
-    expenses = db.collection("expenses"); 
-    settings = db.collection("settings"); 
+    expenses = db.collection("expenses"); // NEW: Stores Ad Spend, Packaging, etc.
+    settings = db.collection("settings"); // NEW: Stores Global Stock Count
 
     // --- INITIALIZE STOCK IF NOT EXISTS ---
     const stockCheck = await settings.findOne({ _id: "main_stock" });
@@ -71,14 +52,17 @@ app.get('/', (req, res) => {
 });
 
 // ============================================================
-// --- FINANCE & STOCK ROUTES ---
+// --- NEW: FINANCE & STOCK ROUTES ---
 // ============================================================
 
-// 1. GET STOCK & EXPENSES
+// 1. GET STOCK & EXPENSES (For Dashboard Analytics)
 app.get("/finance-summary", async (req, res) => {
   try {
+    // Get Stock
     const stockDoc = await settings.findOne({ _id: "main_stock" });
     const currentStock = stockDoc ? stockDoc.quantity : 0;
+
+    // Get Expenses
     const allExpenses = await expenses.find({}).sort({ date: -1 }).toArray();
 
     res.send({ 
@@ -95,6 +79,7 @@ app.get("/finance-summary", async (req, res) => {
 app.post("/expenses", async (req, res) => {
   try {
     const expense = req.body;
+    // Expecting: { type: "Ad Spend", amount: 500, desc: "...", date: "..." }
     expense.date = new Date(expense.date); 
     expense.createdAt = new Date();
     
@@ -118,15 +103,14 @@ app.delete("/expenses/:id", async (req, res) => {
   }
 });
 
-// 4. MANUAL RESTOCK (Fix applied here for Arrays)
+// 4. MANUAL RESTOCK (For Returns/Cancellations from the Queue)
 app.patch("/orders/:id/restock-return", async (req, res) => {
   const id = req.params.id;
   try {
     const order = await allOrders.findOne({ _id: new ObjectId(id) });
     if (!order) return res.status(404).send({ message: "Order not found" });
 
-    // Use Helper to calculate correct quantity from Array or Number
-    const itemsToRestock = getOrderQuantity(order.items);
+    const itemsToRestock = order.items || 1; // Default to 1 if not set
 
     // Increment Global Stock
     await settings.updateOne(
@@ -134,7 +118,7 @@ app.patch("/orders/:id/restock-return", async (req, res) => {
       { $inc: { quantity: itemsToRestock } }
     );
 
-    // Mark order as restocked
+    // Mark order as physically restocked so it doesn't appear in queue again
     const result = await allOrders.updateOne(
       { _id: new ObjectId(id) }, 
       { $set: { isRestocked: true, restockedAt: new Date() } }
@@ -148,7 +132,7 @@ app.patch("/orders/:id/restock-return", async (req, res) => {
 });
 
 // ============================================================
-// --- EXISTING ROUTES ---
+// --- EXISTING ROUTES (WITH STOCK LOGIC UPDATES) ---
 // ============================================================
 
 app.get("/check-ban-status", async (req, res) => {
@@ -177,6 +161,7 @@ app.post("/orders", async (req, res) => {
     const targetPhone = order.number ? String(order.number).trim() : null;
     const targetIp = order.clientInfo?.ip; 
 
+    // Security Checks...
     const blockQuery = { $or: [] };
     if (targetDeviceId) blockQuery.$or.push({ identifier: targetDeviceId });
     if (targetPhone) blockQuery.$or.push({ identifier: targetPhone });
@@ -208,9 +193,9 @@ app.post("/orders", async (req, res) => {
     order.number = targetPhone; 
     if (!order.phoneCallStatus) order.phoneCallStatus = "Pending";
     
-    // NOTE: We keep 'order.items' as is (Array or Number). 
-    // The stock logic routes will parse it using getOrderQuantity() when needed.
-    order.inventoryDeducted = false; 
+    // ENSURE ITEM COUNT EXISTS (For Stock Logic)
+    order.items = order.items || 1; 
+    order.inventoryDeducted = false; // Flag to track if we subtracted stock yet
 
     const result = await allOrders.insertOne(order);
     
@@ -238,7 +223,7 @@ app.get("/orders", async (req, res) => {
   }
 });
 
-// --- UPDATED STATUS CHANGE (Fix applied here for Arrays) ---
+// --- UPDATED STATUS CHANGE (HANDLES STOCK DEDUCTION) ---
 app.patch("/orders/:id", async (req, res) => {
   const id = req.params.id;
   const { status } = req.body;
@@ -252,22 +237,24 @@ app.patch("/orders/:id", async (req, res) => {
 
     let updateFields = { status: status };
 
+    // Set Timestamps
     if (status === "Shipped") updateFields.shippedAt = now;
     else if (status === "Delivered") updateFields.deliveredAt = now;
     else if (status === "Cancelled") updateFields.cancelledAt = now;
     else if (status === "Returned") updateFields.returnedAt = now;
 
     // --- AUTOMATIC STOCK REDUCTION LOGIC ---
+    // If status becomes "Shipped" or "Delivered" AND we haven't deducted stock yet
     const reductionStatuses = ["Shipped", "Delivered"];
     
     if (reductionStatuses.includes(status) && !currentOrder.inventoryDeducted) {
-        // Use Helper to calculate items from Array/Number
-        const itemsToDeduct = getOrderQuantity(currentOrder.items);
-        
+        // Decrease global stock
+        const itemsToDeduct = currentOrder.items || 1;
         await settings.updateOne(
             { _id: "main_stock" }, 
             { $inc: { quantity: -itemsToDeduct } }
         );
+        // Mark order as deducted so we don't do it twice
         updateFields.inventoryDeducted = true;
     }
     // ---------------------------------------
@@ -316,6 +303,7 @@ app.patch("/orders/:id/price", async (req, res) => {
   }
 });
 
+// Partial Orders Routes
 app.post("/save-partial-order", async (req, res) => {
   try {
     const { deviceId, ...data } = req.body;
@@ -356,10 +344,11 @@ app.post("/orders/:id/move-to-abandoned", async (req, res) => {
     const order = await allOrders.findOne({ _id: new ObjectId(id) });
     if (!order) return res.status(404).send({ success: false, message: "Order not found" });
 
-    // Fix: Use Helper for accurate quantity restoration
+    // NOTE: If this order already deducted stock, should we add it back?
+    // For simplicity, if you move to abandoned, we assume it never shipped. 
+    // If it WAS shipped/deducted, we add stock back.
     if (order.inventoryDeducted) {
-         const itemsToAddBack = getOrderQuantity(order.items);
-         await settings.updateOne({ _id: "main_stock" }, { $inc: { quantity: itemsToAddBack } });
+         await settings.updateOne({ _id: "main_stock" }, { $inc: { quantity: (order.items || 1) } });
     }
 
     const abandonedOrder = {
