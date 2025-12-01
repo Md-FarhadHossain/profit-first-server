@@ -11,7 +11,7 @@ app.use(cors());
 // --- CONFIGURATION ---
 // ⚠️ SECURITY WARNING: Ideally, put this in your .env file as OPENROUTER_API_KEY
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "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";
-const AI_MODEL = "google/gemma-2-9b-it:free"; // Using the free Gemma model as requested
+const AI_MODEL = "google/gemma-3-27b-it:free"; // Updated to Gemma 3 27B
 
 const uri = `mongodb+srv://${process.env.user}:${process.env.password}@cluster0.1ivadd4.mongodb.net/?appName=Cluster0`;
 
