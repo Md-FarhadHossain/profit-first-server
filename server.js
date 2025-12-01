@@ -8,6 +8,11 @@ const port = 5000;
 app.use(express.json());
 app.use(cors());
 
+// --- CONFIGURATION ---
+// ⚠️ SECURITY WARNING: Ideally, put this in your .env file as OPENROUTER_API_KEY
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "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";
+const AI_MODEL = "google/gemma-2-9b-it:free"; // Using the free Gemma model as requested
+
 const uri = `mongodb+srv://${process.env.user}:${process.env.password}@cluster0.1ivadd4.mongodb.net/?appName=Cluster0`;
 
 const client = new MongoClient(uri, {
@@ -35,12 +40,54 @@ const partialOrders = client.db("profit-first").collection("partialOrders");
 const blockedUsers = client.db("profit-first").collection("blockedUsers"); 
 
 
+// --- AI HELPER FUNCTION ---
+const analyzeAddressWithAI = async (address) => {
+    if (!address || address.length < 4) return { district: "Unknown", thana: "Unknown" };
+
+    try {
+        const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://profit-first.com", // Replace with your site URL
+                "X-Title": "Profit First Dashboard",
+            },
+            body: JSON.stringify({
+                "model": AI_MODEL,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a location parser for Bangladesh. You will receive an address. Your job is to extract the 'District' and 'Thana' (Sub-district). Return ONLY a JSON object in this format: {\"district\": \"Name\", \"thana\": \"Name\"}. If you cannot find them, return {\"district\": \"Unknown\", \"thana\": \"Unknown\"}. Do not add any markdown formatting."
+                    },
+                    {
+                        "role": "user",
+                        "content": `Address to parse: "${address}"`
+                    }
+                ],
+                "response_format": { type: "json_object" } 
+            })
+        });
+
+        const data = await response.json();
+        const content = data.choices[0].message.content;
+        
+        // Clean up markdown if AI adds it (e.g. ```json ... ```)
+        const cleanJson = content.replace(/```json/g, "").replace(/```/g, "").trim();
+        return JSON.parse(cleanJson);
+
+    } catch (error) {
+        console.error("AI Address Parsing Failed:", error);
+        return { district: "Manual Check", thana: "Manual Check" };
+    }
+};
+
 app.get('/', (req, res) => {
     res.send("Hi");
 });
 
 // ============================================================
-// --- NEW ROUTE: PRE-CHECK BAN STATUS (The Gatekeeper) ---
+// --- BAN CHECK ROUTE ---
 // ============================================================
 app.get("/check-ban-status", async (req, res) => {
     try {
@@ -48,11 +95,9 @@ app.get("/check-ban-status", async (req, res) => {
         
         const query = { $or: [] };
         
-        // Add checks if values exist
         if (ip && ip !== 'undefined' && ip !== 'null') query.$or.push({ identifier: ip });
         if (deviceId && deviceId !== 'undefined' && deviceId !== 'null') query.$or.push({ identifier: deviceId });
 
-        // If no valid identifiers provided, they aren't banned
         if (query.$or.length === 0) {
             return res.send({ banned: false });
         }
@@ -67,13 +112,12 @@ app.get("/check-ban-status", async (req, res) => {
         res.send({ banned: false });
     } catch (error) {
         console.error("Ban check error:", error);
-        res.status(500).send({ banned: false }); // Fail open to not block real users on error
+        res.status(500).send({ banned: false }); 
     }
 });
-// ============================================================
 
 
-// --- UPDATED POST ROUTE ---
+// --- UPDATED POST ROUTE WITH AI ---
 app.post("/orders", async (req, res) => {
   try {
     const order = req.body;
@@ -83,7 +127,7 @@ app.post("/orders", async (req, res) => {
     const targetPhone = order.number ? String(order.number).trim() : null;
     const targetIp = order.clientInfo?.ip; 
 
-    console.log("🛡️ Processing Order Check:", { device: targetDeviceId, phone: targetPhone, ip: targetIp });
+    // console.log("🛡️ Processing Order Check:", { device: targetDeviceId, phone: targetPhone, ip: targetIp });
 
     const blockQuery = { $or: [] };
     if (targetDeviceId) blockQuery.$or.push({ identifier: targetDeviceId });
@@ -126,7 +170,18 @@ app.post("/orders", async (req, res) => {
         customerType: previousOrderCount > 0 ? "Returning" : "New"
     };
 
-    // 4. GENERATE ID & SAVE
+    // 4. AI ADDRESS PROCESSING (NEW IMPLEMENTATION)
+    console.log("🤖 AI Analysis started for address:", order.address);
+    const locationDetails = await analyzeAddressWithAI(order.address);
+    console.log("🤖 AI Result:", locationDetails);
+    
+    order.locationInfo = {
+        district: locationDetails.district,
+        thana: locationDetails.thana,
+        aiProcessed: true
+    };
+
+    // 5. GENERATE ID & SAVE
     const count = await allOrders.countDocuments();
     const generatedOrderId = 501 + count;
 
@@ -145,7 +200,7 @@ app.post("/orders", async (req, res) => {
                 $or: [
                     { number: targetPhone },              
                     { "marketing.number": targetPhone }, 
-                    { phone: targetPhone }                
+                    { phone: targetPhone }                 
                 ]
             });
             if (targetDeviceId) await partialOrders.deleteMany({ deviceId: targetDeviceId });
