@@ -3,56 +3,71 @@ const app = express();
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 require("dotenv").config();
 const cors = require("cors");
-const port = 5000;
+const port = process.env.PORT || 5000;
 
 app.use(express.json());
 app.use(cors());
 
+// --- DATABASE CONNECTION CONFIGURATION ---
 const uri = `mongodb+srv://${process.env.user}:${process.env.password}@cluster0.1ivadd4.mongodb.net/?appName=Cluster0`;
 
-const client = new MongoClient(uri, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
+let client;
+let clientPromise;
+
+if (!process.env.user || !process.env.password) {
+  throw new Error("Missing environment variables: user or password");
+}
+
+if (process.env.NODE_ENV === "development") {
+  // In development mode, use a global variable so the connection
+  // isn't lost when the code hot-reloads
+  if (!global._mongoClientPromise) {
+    client = new MongoClient(uri, {
+      serverApi: {
+        version: ServerApiVersion.v1,
+        strict: true,
+        deprecationErrors: true,
+      },
+    });
+    global._mongoClientPromise = client.connect();
   }
-});
+  clientPromise = global._mongoClientPromise;
+} else {
+  // In production (Vercel), create a new client but cache the promise
+  client = new MongoClient(uri, {
+    serverApi: {
+      version: ServerApiVersion.v1,
+      strict: true,
+      deprecationErrors: true,
+    },
+  });
+  clientPromise = client.connect();
+}
 
-const dbConnect = async () => {
-  try {
-    await client.connect();
-    console.log("Database connected");
-  } catch (error) {
-    console.log(error);
-  }
-};
-
-dbConnect();
-
-// --- COLLECTIONS ---
-const allOrders = client.db("profit-first").collection("allOrders");
-const partialOrders = client.db("profit-first").collection("partialOrders");
-const blockedUsers = client.db("profit-first").collection("blockedUsers"); 
-
+// --- HELPER FUNCTION TO GET COLLECTIONS SAFELY ---
+// This ensures we wait for the database to connect before trying to use it
+async function getCollection(collectionName) {
+  const connectedClient = await clientPromise;
+  return connectedClient.db("profit-first").collection(collectionName);
+}
 
 app.get('/', (req, res) => {
-    res.send("Hi");
+    res.send("Server is Running");
 });
 
 // ============================================================
-// --- NEW ROUTE: PRE-CHECK BAN STATUS (The Gatekeeper) ---
+// --- ROUTE: PRE-CHECK BAN STATUS ---
 // ============================================================
 app.get("/check-ban-status", async (req, res) => {
     try {
         const { ip, deviceId } = req.query;
+        const blockedUsers = await getCollection("blockedUsers"); // Get collection dynamically
         
         const query = { $or: [] };
         
-        // Add checks if values exist
         if (ip && ip !== 'undefined' && ip !== 'null') query.$or.push({ identifier: ip });
         if (deviceId && deviceId !== 'undefined' && deviceId !== 'null') query.$or.push({ identifier: deviceId });
 
-        // If no valid identifiers provided, they aren't banned
         if (query.$or.length === 0) {
             return res.send({ banned: false });
         }
@@ -67,16 +82,21 @@ app.get("/check-ban-status", async (req, res) => {
         res.send({ banned: false });
     } catch (error) {
         console.error("Ban check error:", error);
-        res.status(500).send({ banned: false }); // Fail open to not block real users on error
+        res.status(500).send({ banned: false }); 
     }
 });
+
 // ============================================================
-
-
-// --- UPDATED POST ROUTE ---
+// --- MAIN ORDER ROUTE ---
+// ============================================================
 app.post("/orders", async (req, res) => {
   try {
     const order = req.body;
+    
+    // Connect to collections
+    const allOrders = await getCollection("allOrders");
+    const blockedUsers = await getCollection("blockedUsers");
+    const partialOrders = await getCollection("partialOrders");
 
     // 0. SECURITY: BLOCK SCAMMERS
     const targetDeviceId = order.clientInfo?.deviceId || order.deviceId; 
@@ -138,7 +158,7 @@ app.post("/orders", async (req, res) => {
 
     const result = await allOrders.insertOne(order);
     
-    // CLEANUP
+    // CLEANUP PARTIALS
     if (targetPhone) {
         try {
             await partialOrders.deleteMany({
@@ -165,12 +185,14 @@ app.post("/orders", async (req, res) => {
 
 app.get("/orders", async (req, res) => {
   try {
+    const allOrders = await getCollection("allOrders");
     const query = {};
     const sort = { createdAt: -1 };
     const result = await allOrders.find(query).sort(sort).toArray();
     res.send(result);
   } catch (error) {
     console.log(error);
+    res.status(500).send({ message: "Error fetching orders" });
   }
 });
 
@@ -180,6 +202,7 @@ app.patch("/orders/:id", async (req, res) => {
   const now = new Date();
 
   try {
+    const allOrders = await getCollection("allOrders");
     const filter = { _id: new ObjectId(id) };
     let updateFields = { status: status };
 
@@ -200,6 +223,7 @@ app.patch("/orders/:id/call-status", async (req, res) => {
   const id = req.params.id;
   const { callStatus } = req.body;
   try {
+    const allOrders = await getCollection("allOrders");
     const result = await allOrders.updateOne({ _id: new ObjectId(id) }, { $set: { phoneCallStatus: callStatus } });
     res.send(result);
   } catch (error) {
@@ -212,6 +236,7 @@ app.patch("/orders/:id/shipping-method", async (req, res) => {
   const id = req.params.id;
   const { shippingMethod, shippingCost } = req.body;
   try {
+    const allOrders = await getCollection("allOrders");
     const result = await allOrders.updateOne({ _id: new ObjectId(id) }, { $set: { shipping: shippingMethod, shippingCost: shippingCost } });
     res.send(result);
   } catch (error) {
@@ -224,6 +249,7 @@ app.patch("/orders/:id/price", async (req, res) => {
   const id = req.params.id;
   const { totalValue } = req.body;
   try {
+    const allOrders = await getCollection("allOrders");
     const result = await allOrders.updateOne({ _id: new ObjectId(id) }, { $set: { totalValue: totalValue } });
     res.send(result);
   } catch (error) {
@@ -237,6 +263,7 @@ app.post("/save-partial-order", async (req, res) => {
     const { deviceId, ...data } = req.body;
     if (!deviceId) return res.status(400).send({ success: false, message: "Device ID required" });
 
+    const partialOrders = await getCollection("partialOrders");
     const filter = { deviceId: deviceId };
     const updateDoc = {
       $set: { ...data, lastUpdated: new Date(), status: "Abandoned" },
@@ -252,6 +279,7 @@ app.post("/save-partial-order", async (req, res) => {
 
 app.get("/partial-orders", async (req, res) => {
   try {
+    const partialOrders = await getCollection("partialOrders");
     const result = await partialOrders.find({}).sort({ _id: -1 }).toArray();
     res.send(result);
   } catch (error) {
@@ -263,6 +291,7 @@ app.get("/partial-orders", async (req, res) => {
 app.delete("/partial-orders/:id", async (req, res) => {
   const id = req.params.id;
   try {
+    const partialOrders = await getCollection("partialOrders");
     const result = await partialOrders.deleteOne({ _id: new ObjectId(id) });
     res.send(result);
   } catch (error) {
@@ -274,6 +303,9 @@ app.delete("/partial-orders/:id", async (req, res) => {
 app.post("/orders/:id/move-to-abandoned", async (req, res) => {
   const id = req.params.id;
   try {
+    const allOrders = await getCollection("allOrders");
+    const partialOrders = await getCollection("partialOrders");
+    
     const order = await allOrders.findOne({ _id: new ObjectId(id) });
     if (!order) return res.status(404).send({ success: false, message: "Order not found" });
 
@@ -298,6 +330,7 @@ app.patch("/orders/:id/note", async (req, res) => {
   const id = req.params.id;
   const { note } = req.body;
   try {
+    const allOrders = await getCollection("allOrders");
     const result = await allOrders.updateOne({ _id: new ObjectId(id) }, { $set: { note: note } });
     res.send(result);
   } catch (error) {
@@ -315,6 +348,7 @@ app.post("/admin/block-user", async (req, res) => {
         // Clean the identifier
         identifier = String(identifier).trim();
 
+        const blockedUsers = await getCollection("blockedUsers");
         const exists = await blockedUsers.findOne({ identifier: identifier });
         if (exists) return res.status(400).send({message: "User already blocked"});
 
@@ -329,6 +363,7 @@ app.post("/admin/block-user", async (req, res) => {
 
 app.get("/admin/blocked-users", async (req, res) => {
     try {
+        const blockedUsers = await getCollection("blockedUsers");
         const result = await blockedUsers.find({}).sort({ blockedAt: -1 }).toArray();
         res.send(result);
     } catch (error) {
@@ -339,6 +374,7 @@ app.get("/admin/blocked-users", async (req, res) => {
 app.delete("/admin/blocked-users/:identifier", async (req, res) => {
     try {
         const identifier = req.params.identifier;
+        const blockedUsers = await getCollection("blockedUsers");
         const result = await blockedUsers.deleteOne({ identifier: identifier });
         res.send(result);
     } catch (error) {
