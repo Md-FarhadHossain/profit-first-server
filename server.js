@@ -382,6 +382,83 @@ app.delete("/admin/blocked-users/:identifier", async (req, res) => {
     }
 });
 
+// ============================================================
+// --- ROUTE: MANUAL ORDER ENTRY (ADMIN) ---
+// ============================================================
+app.post("/manual-orders", async (req, res) => {
+  try {
+    const { 
+      name, 
+      number, 
+      address, 
+      shipping, 
+      shippingCost, 
+      productPrice,
+      source, 
+      note 
+    } = req.body;
+
+    const allOrders = await getCollection("allOrders");
+
+    // 1. GENERATE ID (Consistent with main logic)
+    const count = await allOrders.countDocuments();
+    const generatedOrderId = 501 + count;
+
+    // 2. CALCULATE TOTAL
+    // Ensure numbers are numbers to prevent string concatenation errors
+    const finalTotal = Number(productPrice) + Number(shippingCost);
+
+    // 3. CONSTRUCT ORDER OBJECT
+    // We mock clientInfo so the dashboard doesn't crash if it tries to read it
+    const newOrder = {
+      orderId: generatedOrderId,
+      createdAt: new Date(),
+      status: "Processing",
+      
+      // Admin entered orders are usually already confirmed via chat/call
+      phoneCallStatus: "Confirmed", 
+      
+      customer: {
+        name: name,
+        phone: number
+      },
+      name: name,         // Keeping flat structure for compatibility
+      number: number,     // Keeping flat structure for compatibility
+      address: address,
+      shipping: shipping,
+      shippingCost: Number(shippingCost),
+      totalValue: finalTotal,
+      
+      // The Key Requirement: Source Tracking
+      source: source || "Manual", 
+      
+      note: note || "",
+      
+      // Metadata for admin tracking
+      isManualOrder: true,
+      
+      // Mock technical data to prevent UI errors on the main dashboard
+      clientInfo: {
+        userAgent: "Manual Entry (Admin Dashboard)",
+        ip: "127.0.0.1"
+      }
+    };
+
+    const result = await allOrders.insertOne(newOrder);
+
+    res.send({ 
+      success: true, 
+      message: "Manual order added successfully", 
+      orderId: generatedOrderId, 
+      mongoResult: result 
+    });
+
+  } catch (error) {
+    console.log("Manual Order Error:", error);
+    res.status(500).send({ success: false, message: "Server Error" });
+  }
+});
+
 app.listen(port, () => {  
     console.log(`server is running ${port}`);
 });
